@@ -67,6 +67,26 @@ async fn http_request(port: u16, method: &str, path: &str, body: &str) -> (u16, 
     (status, response.to_string())
 }
 
+async fn http_request_with_host(port: u16, method: &str, path: &str, host: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let request = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8_lossy(&response);
+
+    let status_line = response.lines().next().unwrap();
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    (status, response.to_string())
+}
+
 fn response_body(response: &str) -> &str {
     response
         .find("\r\n\r\n")
@@ -401,4 +421,27 @@ async fn api_overlay_url_with_query_params() {
     let url = data["url"].as_str().unwrap();
     assert!(url.contains("max_items=10"));
     assert!(url.contains("font_size=18"));
+}
+
+#[tokio::test]
+async fn api_overlay_url_uses_host_header() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) =
+        http_request_with_host(port, "GET", "/api/overlay-url", "myhost:9999").await;
+    assert_eq!(status, 200);
+    let body = response_body(&resp);
+    let data: serde_json::Value = serde_json::from_str(body).unwrap();
+    let url = data["url"].as_str().unwrap();
+    assert!(url.contains("http://myhost:9999/overlay"));
+}
+
+#[tokio::test]
+async fn api_overlay_url_show_avatar_zero_is_false() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(port, "GET", "/api/overlay-url?show_avatar=0", "").await;
+    assert_eq!(status, 200);
+    let body = response_body(&resp);
+    let data: serde_json::Value = serde_json::from_str(body).unwrap();
+    let url = data["url"].as_str().unwrap();
+    assert!(url.contains("show_avatar=false"));
 }

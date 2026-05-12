@@ -213,9 +213,7 @@ pub fn spawn_synthetic_messages(state: SharedState) {
                 "status": "waiting",
                 "message": format!("connected — waiting for events ({count})")
             });
-            if let Err(e) = panel_tx.send(msg.to_string()) {
-                tracing::error!("panel channel send error: {e}");
-            }
+            let _ = panel_tx.send(msg.to_string());
         }
     });
 
