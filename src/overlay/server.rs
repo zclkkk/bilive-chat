@@ -162,6 +162,11 @@ async fn post_start(
             Json(serde_json::json!({"error": "already running"})),
         )
             .into_response(),
+        Err(StartError::Cancelled) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "cancelled"})),
+        )
+            .into_response(),
         Err(StartError::CookieNotLoggedIn) => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "cookie present but not logged in"})),

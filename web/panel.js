@@ -16,7 +16,7 @@ function formatSocketStatus(status) {
     return type || "unknown";
 }
 
-function setStatus(text, state) {
+function setLiveStatus(text, state) {
     statusBadge.textContent = text;
     statusBadge.className = "status-badge";
     if (state) {
@@ -29,15 +29,15 @@ function updateConnectionUI(socketStatus) {
     connInfo.textContent = label;
     const type = socketStatus && socketStatus.type;
     if (type === "connected") {
-        setStatus("connected", "connected");
+        setLiveStatus("connected", "connected");
         btnStart.disabled = true;
         btnStop.disabled = false;
     } else if (type === "connecting") {
-        setStatus("connecting", "connecting");
+        setLiveStatus("connecting", "connecting");
         btnStart.disabled = true;
         btnStop.disabled = false;
     } else {
-        setStatus("disconnected", "error");
+        setLiveStatus("disconnected", "error");
         btnStart.disabled = false;
         btnStop.disabled = true;
     }
@@ -48,11 +48,20 @@ function flashHint(el, text, ms) {
     setTimeout(() => { el.textContent = ""; }, ms || 2000);
 }
 
+function logEvent(tag, body) {
+    const div = document.createElement("div");
+    div.textContent = `[${tag}] ${body}`;
+    messages.prepend(div);
+    while (messages.children.length > 50) {
+        messages.lastChild.remove();
+    }
+}
+
 function connect() {
     const ws = new WebSocket(`ws://${location.host}/ws/panel`);
 
     ws.onopen = () => {
-        setStatus("connected", "connected");
+        logEvent("panel", "ws connected");
     };
 
     ws.onmessage = (event) => {
@@ -64,19 +73,11 @@ function connect() {
 
         const tag = data.type || "?";
         const body = data.message || formatSocketStatus(data.status) || JSON.stringify(data);
-        const div = document.createElement("div");
-        div.textContent = `[${tag}] ${body}`;
-        messages.prepend(div);
-        while (messages.children.length > 50) {
-            messages.lastChild.remove();
-        }
+        logEvent(tag, body);
     };
 
     ws.onclose = () => {
-        setStatus("disconnected", "error");
-        connInfo.textContent = "Disconnected — reconnecting...";
-        btnStart.disabled = true;
-        btnStop.disabled = true;
+        logEvent("panel", "ws disconnected — reconnecting...");
         setTimeout(connect, 2000);
     };
 
@@ -98,7 +99,7 @@ async function fetchStatus() {
 fetchStatus();
 
 btnStart.addEventListener("click", async () => {
-    btnStart.disabled = true;
+    updateConnectionUI({ type: "connecting" });
     connError.textContent = "";
     try {
         const resp = await fetch("/api/bilibili/start", { method: "POST" });

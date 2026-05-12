@@ -16,7 +16,7 @@ pub struct LiveConnection {
 
 enum ConnectionInner {
     Idle,
-    Starting,
+    Starting(u64),
     Active(ActiveConnection),
 }
 
@@ -41,16 +41,18 @@ impl LiveConnection {
         room_id: u64,
         cookie: Option<String>,
     ) -> Result<(), StartError> {
-        {
+        let generation = {
             let mut guard = self.inner.lock().await;
             match &*guard {
-                ConnectionInner::Active(_) | ConnectionInner::Starting => {
+                ConnectionInner::Active(_) | ConnectionInner::Starting(_) => {
                     return Err(StartError::AlreadyRunning)
                 }
                 ConnectionInner::Idle => {}
             }
-            *guard = ConnectionInner::Starting;
-        }
+            let gen = self.next_generation.fetch_add(1, Ordering::Relaxed);
+            *guard = ConnectionInner::Starting(gen);
+            gen
+        };
 
         let api = auth::LiveBiliApi::new(self.http_client.clone());
         let wts = std::time::SystemTime::now()
@@ -62,7 +64,11 @@ impl LiveConnection {
             Ok(a) => a,
             Err(e) => {
                 let mut guard = self.inner.lock().await;
-                *guard = ConnectionInner::Idle;
+                if let ConnectionInner::Starting(gen) = &*guard {
+                    if *gen == generation {
+                        *guard = ConnectionInner::Idle;
+                    }
+                }
                 return Err(match e {
                     AuthError::CookieNotLoggedIn => StartError::CookieNotLoggedIn,
                     other => StartError::Auth(other),
@@ -70,9 +76,15 @@ impl LiveConnection {
             }
         };
 
-        let (handle, command_rx) = socket::connect(web_auth);
+        {
+            let guard = self.inner.lock().await;
+            match &*guard {
+                ConnectionInner::Starting(gen) if *gen == generation => {}
+                _ => return Err(StartError::Cancelled),
+            }
+        }
 
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let (handle, command_rx) = socket::connect(web_auth);
 
         let conn = Arc::clone(self);
         let status_rx = handle.status_rx.clone();
@@ -81,11 +93,19 @@ impl LiveConnection {
         });
 
         let mut guard = self.inner.lock().await;
-        *guard = ConnectionInner::Active(ActiveConnection {
-            handle,
-            relay_task,
-            generation,
-        });
+        match &*guard {
+            ConnectionInner::Starting(gen) if *gen == generation => {
+                *guard = ConnectionInner::Active(ActiveConnection {
+                    handle,
+                    relay_task,
+                    generation,
+                });
+            }
+            _ => {
+                relay_task.abort();
+                return Err(StartError::Cancelled);
+            }
+        }
 
         Ok(())
     }
@@ -98,7 +118,7 @@ impl LiveConnection {
                 active.relay_task.abort();
                 true
             }
-            ConnectionInner::Starting => true,
+            ConnectionInner::Starting(_) => true,
             ConnectionInner::Idle => false,
         }
     }
@@ -107,7 +127,7 @@ impl LiveConnection {
         let guard = self.inner.lock().await;
         match &*guard {
             ConnectionInner::Idle => SocketStatus::Disconnected { error: None },
-            ConnectionInner::Starting => SocketStatus::Connecting {},
+            ConnectionInner::Starting(_) => SocketStatus::Connecting {},
             ConnectionInner::Active(active) => active.handle.status_rx.borrow().clone(),
         }
     }
@@ -158,6 +178,8 @@ impl LiveConnection {
 pub enum StartError {
     #[error("already running")]
     AlreadyRunning,
+    #[error("cancelled")]
+    Cancelled,
     #[error("cookie present but not logged in")]
     CookieNotLoggedIn,
     #[error("auth error: {0}")]
@@ -229,7 +251,7 @@ mod tests {
         let conn = LiveConnection::new(http_client, tx);
 
         let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Starting;
+        *inner = ConnectionInner::Starting(99);
         drop(inner);
 
         let result = conn.start(12345, None).await;
@@ -245,7 +267,7 @@ mod tests {
         let conn = LiveConnection::new(http_client, tx);
 
         let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Starting;
+        *inner = ConnectionInner::Starting(1);
         drop(inner);
 
         let status = conn.status().await;
@@ -261,10 +283,54 @@ mod tests {
         let conn = LiveConnection::new(http_client, tx);
 
         let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Starting;
+        *inner = ConnectionInner::Starting(1);
         drop(inner);
 
         assert!(conn.stop().await);
+    }
+
+    #[tokio::test]
+    async fn test_stop_during_starting_resets_to_idle() {
+        let http_client = HttpClient::new();
+        let (tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, tx);
+
+        let mut inner = conn.inner.lock().await;
+        *inner = ConnectionInner::Starting(5);
+        drop(inner);
+
+        assert!(conn.stop().await);
+
+        let status = conn.status().await;
+        assert!(matches!(status, SocketStatus::Disconnected { error: None }));
+    }
+
+    #[tokio::test]
+    async fn test_start_resets_to_idle_on_auth_failure() {
+        let http_client = HttpClient::new();
+        let (tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, tx);
+
+        let _ = conn.start(0, None).await;
+
+        let status = conn.status().await;
+        assert!(matches!(status, SocketStatus::Disconnected { error: None }));
+    }
+
+    #[tokio::test]
+    async fn test_start_cancelled_if_state_changed_during_auth() {
+        let http_client = HttpClient::new();
+        let (tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, tx);
+
+        let mut inner = conn.inner.lock().await;
+        *inner = ConnectionInner::Starting(999);
+        drop(inner);
+
+        let result = conn.start(0, None).await;
+        assert!(matches!(result.unwrap_err(), StartError::AlreadyRunning));
+
+        conn.stop().await;
     }
 
     #[tokio::test]
@@ -298,18 +364,6 @@ mod tests {
         drop(command_tx);
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let status = conn.status().await;
-        assert!(matches!(status, SocketStatus::Disconnected { error: None }));
-    }
-
-    #[tokio::test]
-    async fn test_start_resets_to_idle_on_auth_failure() {
-        let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
-
-        let _ = conn.start(0, None).await;
 
         let status = conn.status().await;
         assert!(matches!(status, SocketStatus::Disconnected { error: None }));
