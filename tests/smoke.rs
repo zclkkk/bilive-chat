@@ -1,44 +1,63 @@
 use bilive_chat::overlay::{server, state};
 use futures_util::StreamExt;
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::connect_async;
 
-async fn spawn_server() -> String {
+async fn spawn_server() -> (String, u16) {
     let s = state::new();
     state::spawn_synthetic_messages(s.clone());
 
     let router = server::build_router(s);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let port = listener.local_addr().unwrap().port();
 
     tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
 
-    format!("http://127.0.0.1:{}", addr.port())
+    (format!("http://127.0.0.1:{port}"), port)
+}
+
+async fn http_get(port: u16, path: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8_lossy(&response);
+
+    let status_line = response.lines().next().unwrap();
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    (status, response.to_string())
 }
 
 #[tokio::test]
 async fn panel_page_returns_200() {
-    let base = spawn_server().await;
-    let resp = reqwest::get(format!("{base}/")).await.unwrap();
-    assert_eq!(resp.status(), 200);
-    let body = resp.text().await.unwrap();
+    let (_base, port) = spawn_server().await;
+    let (status, body) = http_get(port, "/").await;
+    assert_eq!(status, 200);
     assert!(body.contains("bilive-chat"));
 }
 
 #[tokio::test]
 async fn overlay_page_returns_200() {
-    let base = spawn_server().await;
-    let resp = reqwest::get(format!("{base}/overlay")).await.unwrap();
-    assert_eq!(resp.status(), 200);
-    let body = resp.text().await.unwrap();
+    let (_base, port) = spawn_server().await;
+    let (status, body) = http_get(port, "/overlay").await;
+    assert_eq!(status, 200);
     assert!(body.contains("chat-container"));
 }
 
 #[tokio::test]
 async fn ws_panel_accepts_client() {
-    let base = spawn_server().await;
+    let (base, _port) = spawn_server().await;
     let ws_url = base.replace("http://", "ws://") + "/ws/panel";
     let (mut ws, _) = connect_async(&ws_url).await.unwrap();
 
@@ -60,7 +79,7 @@ async fn ws_panel_accepts_client() {
 
 #[tokio::test]
 async fn ws_overlay_accepts_client() {
-    let base = spawn_server().await;
+    let (base, _port) = spawn_server().await;
     let ws_url = base.replace("http://", "ws://") + "/ws/overlay";
     let (mut ws, _) = connect_async(&ws_url).await.unwrap();
 

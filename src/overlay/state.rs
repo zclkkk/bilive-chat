@@ -31,9 +31,7 @@ pub fn spawn_synthetic_messages(state: SharedState) {
                 "status": "waiting",
                 "message": format!("connected — waiting for events ({count})")
             });
-            if panel_tx.send(msg.to_string()).is_err() {
-                break;
-            }
+            let _ = panel_tx.send(msg.to_string());
         }
     });
 
@@ -49,9 +47,7 @@ pub fn spawn_synthetic_messages(state: SharedState) {
                 "kind": "system",
                 "text": format!("system event #{count}")
             });
-            if overlay_tx.send(msg.to_string()).is_err() {
-                break;
-            }
+            let _ = overlay_tx.send(msg.to_string());
         }
     });
 }

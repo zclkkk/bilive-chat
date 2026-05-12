@@ -19,7 +19,6 @@ function connect() {
     };
 
     ws.onclose = () => {
-        container.textContent = "disconnected — reconnecting...";
         setTimeout(connect, 2000);
     };
 
