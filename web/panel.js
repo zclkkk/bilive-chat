@@ -31,27 +31,23 @@ function connect() {
 
 connect();
 
-// Config
+// Config (room id only)
 const configForm = document.getElementById("config-form");
 const configStatus = document.getElementById("config-status");
+let currentConfig = {};
 
 async function loadConfig() {
     const resp = await fetch("/api/config");
-    const cfg = await resp.json();
-    document.getElementById("cfg-host").value = cfg.host || "";
-    document.getElementById("cfg-port").value = cfg.port || 7792;
-    document.getElementById("cfg-room").value = cfg.room_id || 0;
+    currentConfig = await resp.json();
+    document.getElementById("cfg-room").value = currentConfig.room_id || 0;
 }
 
 configForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     configStatus.textContent = "saving...";
     const body = {
-        host: document.getElementById("cfg-host").value,
-        port: parseInt(document.getElementById("cfg-port").value, 10),
+        ...currentConfig,
         room_id: parseInt(document.getElementById("cfg-room").value, 10),
-        overlay: {},
-        filter: {},
     };
     const resp = await fetch("/api/config", {
         method: "POST",

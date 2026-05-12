@@ -1,6 +1,5 @@
-use bilive_chat::config::{Config, LoginState};
+use bilive_chat::config::ConfigStore;
 use bilive_chat::overlay;
-use bilive_chat::overlay::server::AppState;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -11,10 +10,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let data_dir = PathBuf::from("data");
-    let config = Config::load(&data_dir)?;
-    let login_state = LoginState::load(&data_dir)?;
+    let store = Arc::new(ConfigStore::new(PathBuf::from("data")));
+    store.load_config()?;
+    store.load_login_state()?;
 
+    let config = store.config.lock().unwrap().clone();
     tracing::info!(
         "loaded config: room_id={}, host={}, port={}",
         config.room_id,
@@ -25,13 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shared = overlay::state::new();
     overlay::state::spawn_synthetic_messages(shared.clone());
 
-    let app = Arc::new(AppState {
-        config: std::sync::Mutex::new(config.clone()),
-        login_state: std::sync::Mutex::new(login_state),
-        data_dir,
-    });
-
-    let router = overlay::server::build_router(shared, app);
+    let router = overlay::server::build_router(shared, store);
 
     let addr = format!("{}:{}", config.host, config.port);
     tracing::info!("starting server on {addr}");

@@ -1,7 +1,8 @@
 pub mod types;
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use types::{FilterOptions, OverlayOptions};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,27 +40,6 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load(data_dir: &Path) -> Result<Self, String> {
-        let path = data_dir.join("config.json");
-        match std::fs::read_to_string(&path) {
-            Ok(data) => {
-                let config: Config =
-                    serde_json::from_str(&data).map_err(|e| format!("invalid config: {e}"))?;
-                config.validate()?;
-                Ok(config)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(format!("failed to read config: {e}")),
-        }
-    }
-
-    pub fn save(&self, data_dir: &Path) -> Result<(), String> {
-        std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
-        let path = data_dir.join("config.json");
-        let data = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, data).map_err(|e| e.to_string())
-    }
-
     pub fn validate(&self) -> Result<(), String> {
         if self.host.is_empty() {
             return Err("host must not be empty".into());
@@ -83,31 +63,88 @@ pub struct LoginState {
     pub updated: Option<String>,
 }
 
-impl LoginState {
-    pub fn load(data_dir: &Path) -> Result<Self, String> {
-        let path = data_dir.join("login-state.json");
+pub struct ConfigStore {
+    data_dir: PathBuf,
+    pub config: Mutex<Config>,
+    pub login_state: Mutex<LoginState>,
+}
+
+impl ConfigStore {
+    pub fn new(data_dir: PathBuf) -> Self {
+        Self {
+            data_dir,
+            config: Mutex::new(Config::default()),
+            login_state: Mutex::new(LoginState::default()),
+        }
+    }
+
+    pub fn load_config(&self) -> Result<(), String> {
+        let path = self.data_dir.join("config.json");
         match std::fs::read_to_string(&path) {
             Ok(data) => {
-                serde_json::from_str(&data).map_err(|e| format!("invalid login state: {e}"))
+                let config: Config =
+                    serde_json::from_str(&data).map_err(|e| format!("invalid config: {e}"))?;
+                config.validate()?;
+                *self.config.lock().unwrap() = config;
+                Ok(())
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("failed to read config: {e}")),
+        }
+    }
+
+    pub fn save_config(&self, config: &Config) -> Result<(), String> {
+        let path = self.data_dir.join("config.json");
+        atomic_write(
+            &path,
+            &serde_json::to_string_pretty(config).map_err(|e| e.to_string())?,
+        )?;
+        *self.config.lock().unwrap() = config.clone();
+        Ok(())
+    }
+
+    pub fn load_login_state(&self) -> Result<(), String> {
+        let path = self.data_dir.join("login-state.json");
+        match std::fs::read_to_string(&path) {
+            Ok(data) => {
+                let state: LoginState =
+                    serde_json::from_str(&data).map_err(|e| format!("invalid login state: {e}"))?;
+                *self.login_state.lock().unwrap() = state;
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("failed to read login state: {e}")),
         }
     }
 
-    pub fn save(&self, data_dir: &Path) -> Result<(), String> {
-        std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
-        let path = data_dir.join("login-state.json");
-        let data = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, data).map_err(|e| e.to_string())
+    pub fn save_login_state(&self, state: &LoginState) -> Result<(), String> {
+        let path = self.data_dir.join("login-state.json");
+        atomic_write(
+            &path,
+            &serde_json::to_string_pretty(state).map_err(|e| e.to_string())?,
+        )?;
+        *self.login_state.lock().unwrap() = state.clone();
+        Ok(())
     }
 
-    pub fn delete(data_dir: &Path) -> Result<(), String> {
-        let path = data_dir.join("login-state.json");
-        match std::fs::remove_file(path) {
+    pub fn delete_login_state(&self) -> Result<(), String> {
+        let path = self.data_dir.join("login-state.json");
+        match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.to_string()),
-        }
+        }?;
+        *self.login_state.lock().unwrap() = LoginState::default();
+        Ok(())
     }
+}
+
+fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    Ok(())
 }

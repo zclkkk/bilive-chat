@@ -1,30 +1,32 @@
-use bilive_chat::config::{Config, LoginState};
-use bilive_chat::overlay::{server, server::AppState, state};
+use bilive_chat::config::{Config, ConfigStore, LoginState};
+use bilive_chat::overlay::{server, state};
 use futures_util::StreamExt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::connect_async;
 
-fn isolated_data_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("bilive-chat-test-{}", std::process::id()));
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "bilive-chat-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
 async fn spawn_server() -> (String, u16, PathBuf) {
-    let data_dir = isolated_data_dir();
+    let data_dir = temp_dir("server");
     let shared = state::new();
     state::spawn_synthetic_messages(shared.clone());
 
-    let app = Arc::new(AppState {
-        config: Mutex::new(Config::default()),
-        login_state: Mutex::new(LoginState::default()),
-        data_dir: data_dir.clone(),
-    });
-
-    let router = server::build_router(shared, app);
+    let store = Arc::new(ConfigStore::new(data_dir.clone()));
+    let router = server::build_router(shared, store);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
@@ -72,6 +74,8 @@ fn response_body(response: &str) -> &str {
         .unwrap_or("")
 }
 
+// HTTP route tests
+
 #[tokio::test]
 async fn panel_page_returns_200() {
     let (_base, port, _dir) = spawn_server().await;
@@ -87,6 +91,8 @@ async fn overlay_page_returns_200() {
     assert_eq!(status, 200);
     assert!(body.contains("chat-container"));
 }
+
+// WebSocket tests
 
 #[tokio::test]
 async fn ws_panel_accepts_client() {
@@ -131,6 +137,8 @@ async fn ws_overlay_accepts_client() {
     assert_eq!(parsed["type"], "display");
     assert!(parsed["text"].as_str().unwrap().contains("system event"));
 }
+
+// Config API tests
 
 #[tokio::test]
 async fn api_config_get_returns_defaults() {
@@ -197,6 +205,8 @@ async fn api_config_post_rejects_zero_max_items() {
     assert_eq!(status, 400);
 }
 
+// Login state API tests
+
 #[tokio::test]
 async fn api_login_state_save_and_delete() {
     let (_base, port, data_dir) = spawn_server().await;
@@ -223,66 +233,84 @@ async fn api_login_state_post_missing_cookie() {
     assert_eq!(status, 400);
 }
 
+// ConfigStore sync tests
+
 #[test]
 fn config_load_missing_file_returns_defaults() {
-    let dir = std::env::temp_dir().join(format!("bilive-chat-test-missing-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let cfg = Config::load(&dir).unwrap();
+    let dir = temp_dir("cfg-missing");
+    let store = ConfigStore::new(dir.clone());
+    store.load_config().unwrap();
+    let cfg = store.config.lock().unwrap().clone();
     assert_eq!(cfg.host, "127.0.0.1");
     assert_eq!(cfg.port, 7792);
 }
 
 #[test]
 fn config_load_invalid_json_returns_error() {
-    let dir = std::env::temp_dir().join(format!("bilive-chat-test-badjson-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = temp_dir("cfg-badjson");
     std::fs::write(dir.join("config.json"), "not json").unwrap();
-    let result = Config::load(&dir);
+    let store = ConfigStore::new(dir);
+    let result = store.load_config();
     assert!(result.is_err());
-    let _ = std::fs::remove_dir_all(&dir);
+    assert!(result.unwrap_err().contains("invalid config"));
 }
 
 #[test]
 fn config_save_and_load_roundtrip() {
-    let dir =
-        std::env::temp_dir().join(format!("bilive-chat-test-roundtrip-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = temp_dir("cfg-roundtrip");
+    let store = ConfigStore::new(dir.clone());
     let cfg = Config {
         room_id: 42,
         ..Config::default()
     };
-    cfg.save(&dir).unwrap();
-    let loaded = Config::load(&dir).unwrap();
+    store.save_config(&cfg).unwrap();
+    store.load_config().unwrap();
+    let loaded = store.config.lock().unwrap().clone();
     assert_eq!(loaded.room_id, 42);
-    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn config_atomic_write_no_tmp_leftover() {
+    let dir = temp_dir("cfg-atomic");
+    let store = ConfigStore::new(dir.clone());
+    store.save_config(&Config::default()).unwrap();
+    assert!(!dir.join("config.json.tmp").exists());
+    assert!(dir.join("config.json").exists());
 }
 
 #[test]
 fn login_state_load_missing_file_returns_default() {
-    let dir = std::env::temp_dir().join(format!(
-        "bilive-chat-test-ls-missing-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    let ls = LoginState::load(&dir).unwrap();
+    let dir = temp_dir("ls-missing");
+    let store = ConfigStore::new(dir);
+    store.load_login_state().unwrap();
+    let ls = store.login_state.lock().unwrap().clone();
     assert!(ls.cookie.is_empty());
 }
 
 #[test]
+fn login_state_load_invalid_json_returns_error() {
+    let dir = temp_dir("ls-badjson");
+    std::fs::write(dir.join("login-state.json"), "{bad}").unwrap();
+    let store = ConfigStore::new(dir);
+    let result = store.load_login_state();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("invalid login state"));
+}
+
+#[test]
 fn login_state_save_load_delete() {
-    let dir =
-        std::env::temp_dir().join(format!("bilive-chat-test-ls-cycle-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = temp_dir("ls-cycle");
+    let store = ConfigStore::new(dir.clone());
     let ls = LoginState {
         cookie: "abc".into(),
         updated: Some("123".into()),
     };
-    ls.save(&dir).unwrap();
-    let loaded = LoginState::load(&dir).unwrap();
+    store.save_login_state(&ls).unwrap();
+    store.load_login_state().unwrap();
+    let loaded = store.login_state.lock().unwrap().clone();
     assert_eq!(loaded.cookie, "abc");
-    LoginState::delete(&dir).unwrap();
+    store.delete_login_state().unwrap();
     assert!(!dir.join("login-state.json").exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

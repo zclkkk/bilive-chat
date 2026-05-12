@@ -2,11 +2,10 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::state::SharedState;
-use crate::config::{Config, LoginState};
+use crate::config::{Config, ConfigStore, LoginState};
 
 const PANEL_HTML: &str = include_str!("../../web/panel.html");
 const OVERLAY_HTML: &str = include_str!("../../web/overlay.html");
@@ -15,13 +14,7 @@ const PANEL_JS: &str = include_str!("../../web/panel.js");
 const OVERLAY_CSS: &str = include_str!("../../web/overlay.css");
 const OVERLAY_JS: &str = include_str!("../../web/overlay.js");
 
-pub struct AppState {
-    pub config: Mutex<Config>,
-    pub login_state: Mutex<LoginState>,
-    pub data_dir: PathBuf,
-}
-
-pub fn build_router(shared: SharedState, app: Arc<AppState>) -> Router {
+pub fn build_router(shared: SharedState, store: Arc<ConfigStore>) -> Router {
     Router::new()
         .route("/", get(|| async { axum::response::Html(PANEL_HTML) }))
         .route(
@@ -50,17 +43,17 @@ pub fn build_router(shared: SharedState, app: Arc<AppState>) -> Router {
         .route("/api/config", post(post_config))
         .route("/api/bilibili/login-state", post(post_login_state))
         .route("/api/bilibili/login-state", delete(delete_login_state))
-        .layer(Extension(app))
+        .layer(Extension(store))
         .with_state(shared)
 }
 
-async fn get_config(Extension(app): Extension<Arc<AppState>>) -> impl IntoResponse {
-    let config = app.config.lock().unwrap().clone();
+async fn get_config(Extension(store): Extension<Arc<ConfigStore>>) -> impl IntoResponse {
+    let config = store.config.lock().unwrap().clone();
     Json(config)
 }
 
 async fn post_config(
-    Extension(app): Extension<Arc<AppState>>,
+    Extension(store): Extension<Arc<ConfigStore>>,
     Json(new_config): Json<Config>,
 ) -> impl IntoResponse {
     if let Err(e) = new_config.validate() {
@@ -70,19 +63,18 @@ async fn post_config(
         )
             .into_response();
     }
-    if let Err(e) = new_config.save(Path::new(&app.data_dir)) {
+    if let Err(e) = store.save_config(&new_config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
         )
             .into_response();
     }
-    *app.config.lock().unwrap() = new_config;
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
 async fn post_login_state(
-    Extension(app): Extension<Arc<AppState>>,
+    Extension(store): Extension<Arc<ConfigStore>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let cookie = match body.get("cookie").and_then(|v| v.as_str()) {
@@ -101,27 +93,25 @@ async fn post_login_state(
         updated: Some(now_secs()),
     };
 
-    if let Err(e) = state.save(Path::new(&app.data_dir)) {
+    if let Err(e) = store.save_login_state(&state) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
         )
             .into_response();
     }
-    *app.login_state.lock().unwrap() = state;
     tracing::info!("login state saved");
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
-async fn delete_login_state(Extension(app): Extension<Arc<AppState>>) -> impl IntoResponse {
-    if let Err(e) = LoginState::delete(Path::new(&app.data_dir)) {
+async fn delete_login_state(Extension(store): Extension<Arc<ConfigStore>>) -> impl IntoResponse {
+    if let Err(e) = store.delete_login_state() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
         )
             .into_response();
     }
-    *app.login_state.lock().unwrap() = LoginState::default();
     tracing::info!("login state deleted");
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
