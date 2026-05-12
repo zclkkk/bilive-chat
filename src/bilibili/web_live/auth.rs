@@ -387,6 +387,12 @@ async fn fetch_nav_data(
         .next()
         .and_then(|s| s.split('.').next())
         .unwrap_or("");
+    if img_key.is_empty() {
+        return Err(AuthError::MissingData(
+            "nav wbi_img.img_url yielded empty key".into(),
+        ));
+    }
+
     let sub_key = nav_data
         .wbi_img
         .sub_url
@@ -394,8 +400,20 @@ async fn fetch_nav_data(
         .next()
         .and_then(|s| s.split('.').next())
         .unwrap_or("");
+    if sub_key.is_empty() {
+        return Err(AuthError::MissingData(
+            "nav wbi_img.sub_url yielded empty key".into(),
+        ));
+    }
 
     let mixin_key = get_mixin_key(&format!("{img_key}{sub_key}"));
+    if mixin_key.len() < 32 {
+        return Err(AuthError::InvalidOutput(format!(
+            "mixin_key too short: {} chars (need 32)",
+            mixin_key.len()
+        )));
+    }
+
     let uid = nav_data.mid.filter(|uid| *uid > 0);
 
     Ok((mixin_key, uid, nav_data.is_login))
@@ -945,5 +963,48 @@ mod tests {
         };
         let result = prepare(&api, 12345, None, 1700000000).await.unwrap();
         assert_eq!(result.room_id, 12345);
+    }
+
+    #[tokio::test]
+    async fn test_prepare_nav_empty_img_url() {
+        let mut nav = fixture_nav_data(false, 0);
+        nav.wbi_img.img_url = String::new();
+        let api = MockBiliApi {
+            spi: success_response(SpiData { b_3: "b3".into() }),
+            room_init: success_response(RoomInitData { room_id: 12345 }),
+            nav: success_response(nav),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, None, 1700000000).await;
+        assert!(matches!(result.unwrap_err(), AuthError::MissingData(_)));
+    }
+
+    #[tokio::test]
+    async fn test_prepare_nav_empty_sub_url() {
+        let mut nav = fixture_nav_data(false, 0);
+        nav.wbi_img.sub_url = String::new();
+        let api = MockBiliApi {
+            spi: success_response(SpiData { b_3: "b3".into() }),
+            room_init: success_response(RoomInitData { room_id: 12345 }),
+            nav: success_response(nav),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, None, 1700000000).await;
+        assert!(matches!(result.unwrap_err(), AuthError::MissingData(_)));
+    }
+
+    #[tokio::test]
+    async fn test_prepare_nav_key_material_too_short() {
+        let mut nav = fixture_nav_data(false, 0);
+        nav.wbi_img.img_url = "https://example.com/a.png".into();
+        nav.wbi_img.sub_url = "https://example.com/b.png".into();
+        let api = MockBiliApi {
+            spi: success_response(SpiData { b_3: "b3".into() }),
+            room_init: success_response(RoomInitData { room_id: 12345 }),
+            nav: success_response(nav),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, None, 1700000000).await;
+        assert!(matches!(result.unwrap_err(), AuthError::InvalidOutput(_)));
     }
 }
