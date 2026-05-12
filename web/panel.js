@@ -1,12 +1,45 @@
 const statusBadge = document.getElementById("status");
 const connInfo = document.getElementById("conn-info");
+const connError = document.getElementById("conn-error");
+const btnStart = document.getElementById("btn-start");
+const btnStop = document.getElementById("btn-stop");
 const messages = document.getElementById("messages");
+
+function formatSocketStatus(status) {
+    if (!status || typeof status !== "object") return String(status);
+    const type = status.type;
+    if (type === "connected") return "connected";
+    if (type === "connecting") return "connecting";
+    if (type === "disconnected") {
+        return status.error ? "disconnected: " + status.error : "disconnected";
+    }
+    return type || "unknown";
+}
 
 function setStatus(text, state) {
     statusBadge.textContent = text;
     statusBadge.className = "status-badge";
     if (state) {
         statusBadge.classList.add(state);
+    }
+}
+
+function updateConnectionUI(socketStatus) {
+    const label = formatSocketStatus(socketStatus);
+    connInfo.textContent = label;
+    const type = socketStatus && socketStatus.type;
+    if (type === "connected") {
+        setStatus("connected", "connected");
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+    } else if (type === "connecting") {
+        setStatus("connecting", "connecting");
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+    } else {
+        setStatus("disconnected", "error");
+        btnStart.disabled = false;
+        btnStop.disabled = true;
     }
 }
 
@@ -20,19 +53,18 @@ function connect() {
 
     ws.onopen = () => {
         setStatus("connected", "connected");
-        connInfo.textContent = "WebSocket connected";
     };
 
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        const div = document.createElement("div");
 
-        if (data.type === "status") {
-            connInfo.textContent = data.message || data.status || "connected";
+        if (data.type === "status" && data.status) {
+            updateConnectionUI(data.status);
         }
 
         const tag = data.type || "?";
-        const body = data.message || data.status || JSON.stringify(data);
+        const body = data.message || formatSocketStatus(data.status) || JSON.stringify(data);
+        const div = document.createElement("div");
         div.textContent = `[${tag}] ${body}`;
         messages.prepend(div);
         while (messages.children.length > 50) {
@@ -43,6 +75,8 @@ function connect() {
     ws.onclose = () => {
         setStatus("disconnected", "error");
         connInfo.textContent = "Disconnected — reconnecting...";
+        btnStart.disabled = true;
+        btnStop.disabled = true;
         setTimeout(connect, 2000);
     };
 
@@ -52,6 +86,46 @@ function connect() {
 }
 
 connect();
+
+async function fetchStatus() {
+    try {
+        const resp = await fetch("/api/bilibili/status");
+        const status = await resp.json();
+        updateConnectionUI(status);
+    } catch (_) {}
+}
+
+fetchStatus();
+
+btnStart.addEventListener("click", async () => {
+    btnStart.disabled = true;
+    connError.textContent = "";
+    try {
+        const resp = await fetch("/api/bilibili/start", { method: "POST" });
+        if (!resp.ok) {
+            const data = await resp.json();
+            connError.textContent = data.error || "start failed";
+        }
+    } catch (e) {
+        connError.textContent = e.message || "network error";
+    }
+    fetchStatus();
+});
+
+btnStop.addEventListener("click", async () => {
+    btnStop.disabled = true;
+    connError.textContent = "";
+    try {
+        const resp = await fetch("/api/bilibili/stop", { method: "POST" });
+        if (!resp.ok) {
+            const data = await resp.json();
+            connError.textContent = data.error || "stop failed";
+        }
+    } catch (e) {
+        connError.textContent = e.message || "network error";
+    }
+    fetchStatus();
+});
 
 async function loadOverlayUrl() {
     const resp = await fetch("/api/overlay-url");

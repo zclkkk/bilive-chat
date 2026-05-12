@@ -103,7 +103,15 @@ async fn run_connection(
         "key": auth.key,
         "buvid": auth.buvid3,
     });
-    let auth_json = serde_json::to_string(&auth_body).unwrap_or_default();
+    let auth_json = match serde_json::to_string(&auth_body) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = status_tx.send(SocketStatus::Disconnected {
+                error: Some(format!("auth serialize error: {e}")),
+            });
+            return;
+        }
+    };
     let auth_packet = build_packet(OP_AUTH, &auth_json);
 
     if sink

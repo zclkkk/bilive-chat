@@ -448,3 +448,32 @@ async fn api_overlay_url_show_avatar_zero_is_false() {
     let url = data["url"].as_str().unwrap();
     assert!(url.contains("show_avatar=false"));
 }
+
+// Bilibili connection API tests
+
+#[tokio::test]
+async fn api_bilibili_status_returns_disconnected() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(port, "GET", "/api/bilibili/status", "").await;
+    assert_eq!(status, 200);
+    let body = response_body(&resp);
+    let data: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(data["type"], "disconnected");
+}
+
+#[tokio::test]
+async fn api_bilibili_start_rejects_zero_room() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(port, "POST", "/api/bilibili/start", "").await;
+    assert_eq!(status, 400);
+    let body = response_body(&resp);
+    let data: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert!(data["error"].as_str().unwrap().contains("room_id"));
+}
+
+#[tokio::test]
+async fn api_bilibili_stop_returns_conflict_when_idle() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, _resp) = http_request(port, "POST", "/api/bilibili/stop", "").await;
+    assert_eq!(status, 409);
+}

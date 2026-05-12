@@ -62,6 +62,11 @@ header h1 {
     color: var(--success);
 }
 
+.status-badge.connecting {
+    background: #2e2a1e;
+    color: #e0c040;
+}
+
 .status-badge.error {
     background: var(--danger-surface);
     color: var(--danger);
@@ -190,6 +195,10 @@ input[type="number"]:focus {
 .hint {
     font-size: 0.82rem;
     color: var(--success);
+}
+
+.hint-error {
+    color: var(--danger);
 }
 
 .hint:empty {

@@ -144,10 +144,11 @@ async fn post_start(
 
     let cookie = {
         let state = store.login_state.lock().unwrap();
-        if state.cookie.is_empty() {
+        let trimmed = state.cookie.trim();
+        if trimmed.is_empty() {
             None
         } else {
-            Some(state.cookie.clone())
+            Some(trimmed.to_string())
         }
     };
 
