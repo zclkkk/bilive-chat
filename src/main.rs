@@ -1,3 +1,4 @@
+use bilive_chat::bilibili::web_live::{HttpClient, LiveConnection};
 use bilive_chat::config::ConfigStore;
 use bilive_chat::overlay;
 use std::path::PathBuf;
@@ -25,7 +26,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shared = overlay::state::new();
     overlay::state::spawn_synthetic_messages(shared.clone());
 
-    let router = overlay::server::build_router(shared, store);
+    let http_client = HttpClient::new();
+    let live = LiveConnection::new(http_client, shared.panel_tx.clone());
+
+    let router = overlay::server::build_router(shared, store, live);
 
     let addr = format!("{}:{}", config.host, config.port);
     tracing::info!("starting server on {addr}");

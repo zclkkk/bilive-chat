@@ -21,7 +21,10 @@ hex = "0.4"
 urlencoding = "2"
 thiserror = "2"
 async-trait = "0.1"
+tokio-tungstenite = { version = "0.26", features = ["__rustls-tls"] }
+flate2 = "1"
+brotli = "7"
+tokio-util = { version = "0.7", features = ["rt"] }
+futures-util = "0.3"
 
 [dev-dependencies]
-futures-util = "0.3"
-tokio-tungstenite = "0.26"

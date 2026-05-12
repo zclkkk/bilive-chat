@@ -1,5 +1,5 @@
 use axum::extract::Query;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::state::SharedState;
+use crate::bilibili::web_live::{LiveConnection, StartError};
 use crate::config::{Config, ConfigStore, LoginState};
 
 const PANEL_HTML: &str = include_str!("../../web/panel.html");
@@ -16,7 +17,11 @@ const PANEL_JS: &str = include_str!("../../web/panel.js");
 const OVERLAY_CSS: &str = include_str!("../../web/overlay.css");
 const OVERLAY_JS: &str = include_str!("../../web/overlay.js");
 
-pub fn build_router(shared: SharedState, store: Arc<ConfigStore>) -> Router {
+pub fn build_router(
+    shared: SharedState,
+    store: Arc<ConfigStore>,
+    live: Arc<LiveConnection>,
+) -> Router {
     Router::new()
         .route("/", get(|| async { axum::response::Html(PANEL_HTML) }))
         .route(
@@ -46,7 +51,11 @@ pub fn build_router(shared: SharedState, store: Arc<ConfigStore>) -> Router {
         .route("/api/bilibili/login-state", post(post_login_state))
         .route("/api/bilibili/login-state", delete(delete_login_state))
         .route("/api/overlay-url", get(get_overlay_url))
+        .route("/api/bilibili/start", post(post_start))
+        .route("/api/bilibili/stop", post(post_stop))
+        .route("/api/bilibili/status", get(get_status))
         .layer(Extension(store))
+        .layer(Extension(live))
         .with_state(shared)
 }
 
@@ -119,9 +128,73 @@ async fn delete_login_state(Extension(store): Extension<Arc<ConfigStore>>) -> im
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
+async fn post_start(
+    Extension(store): Extension<Arc<ConfigStore>>,
+    Extension(live): Extension<Arc<LiveConnection>>,
+) -> impl IntoResponse {
+    let config = store.config.lock().unwrap().clone();
+    let room_id = config.room_id;
+    if room_id == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "room_id is 0"})),
+        )
+            .into_response();
+    }
+
+    let cookie = {
+        let state = store.login_state.lock().unwrap();
+        if state.cookie.is_empty() {
+            None
+        } else {
+            Some(state.cookie.clone())
+        }
+    };
+
+    match live.start(room_id, cookie).await {
+        Ok(()) => {
+            tracing::info!("web_live started for room {room_id}");
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
+        Err(StartError::AlreadyRunning) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "already running"})),
+        )
+            .into_response(),
+        Err(StartError::CookieNotLoggedIn) => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "cookie present but not logged in"})),
+        )
+            .into_response(),
+        Err(StartError::Auth(e)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn post_stop(Extension(live): Extension<Arc<LiveConnection>>) -> impl IntoResponse {
+    if live.stop().await {
+        tracing::info!("web_live stopped");
+        (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+    } else {
+        (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "not running"})),
+        )
+            .into_response()
+    }
+}
+
+async fn get_status(Extension(live): Extension<Arc<LiveConnection>>) -> impl IntoResponse {
+    let status = live.status().await;
+    Json(serde_json::to_value(status).unwrap_or_default())
+}
+
 async fn get_overlay_url(
     Extension(store): Extension<Arc<ConfigStore>>,
-    headers: HeaderMap,
+    headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let config = store.config.lock().unwrap().clone();

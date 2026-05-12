@@ -1,3 +1,4 @@
+use bilive_chat::bilibili::web_live::{HttpClient, LiveConnection};
 use bilive_chat::config::{Config, ConfigStore, LoginState};
 use bilive_chat::overlay::{server, state};
 use futures_util::StreamExt;
@@ -26,7 +27,9 @@ async fn spawn_server() -> (String, u16, PathBuf) {
     state::spawn_synthetic_messages(shared.clone());
 
     let store = Arc::new(ConfigStore::new(data_dir.clone()));
-    let router = server::build_router(shared, store);
+    let http_client = HttpClient::new();
+    let live = LiveConnection::new(http_client, shared.panel_tx.clone());
+    let router = server::build_router(shared, store, live);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
