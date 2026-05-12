@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use hyper::{Request, Uri};
+use hyper::{Request, StatusCode, Uri};
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
@@ -34,10 +34,17 @@ impl HttpClient {
         Self { inner }
     }
 
-    pub async fn send(&self, req: Request<HttpBody>) -> Result<Bytes, HttpError> {
+    pub async fn send(&self, req: Request<HttpBody>) -> Result<Response, HttpError> {
         let resp = self.inner.request(req).await?;
-        Ok(resp.into_body().collect().await?.to_bytes())
+        let status = resp.status();
+        let body = resp.into_body().collect().await?.to_bytes();
+        Ok(Response { status, body })
     }
+}
+
+pub struct Response {
+    pub status: StatusCode,
+    pub body: Bytes,
 }
 
 pub fn build_uri(raw: &str) -> Result<Uri, HttpError> {
@@ -63,8 +70,14 @@ pub async fn api_get<T: DeserializeOwned>(
     for (key, value) in headers {
         req = req.header(*key, *value);
     }
-    let body = client.send(req.body(empty_body())?).await?;
-    Ok(serde_json::from_slice(&body)?)
+    let resp = client.send(req.body(empty_body())?).await?;
+    if !resp.status.is_success() {
+        return Err(HttpError::Status {
+            status: resp.status,
+            body: String::from_utf8_lossy(&resp.body).into_owned(),
+        });
+    }
+    Ok(serde_json::from_slice(&resp.body)?)
 }
 
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -84,4 +97,6 @@ pub enum HttpError {
     Body(#[from] hyper::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("HTTP {status}: {body}")]
+    Status { status: StatusCode, body: String },
 }

@@ -72,6 +72,29 @@ pub struct WebLiveAuth {
     pub urls: Vec<String>,
 }
 
+fn validate_ws_url(url: &str) -> Result<(), AuthError> {
+    let parsed = url
+        .parse::<hyper::Uri>()
+        .map_err(|_| AuthError::InvalidOutput(format!("unparseable WebSocket URL: {url}")))?;
+    if parsed.scheme_str() != Some("wss") {
+        return Err(AuthError::InvalidOutput(format!(
+            "WebSocket URL must use wss scheme: {url}"
+        )));
+    }
+    let host = parsed.host().unwrap_or("");
+    if host.is_empty() {
+        return Err(AuthError::InvalidOutput(format!(
+            "WebSocket URL has empty host: {url}"
+        )));
+    }
+    if parsed.path() != "/sub" {
+        return Err(AuthError::InvalidOutput(format!(
+            "WebSocket URL must have path /sub: {url}"
+        )));
+    }
+    Ok(())
+}
+
 impl WebLiveAuth {
     pub fn validate(&self) -> Result<(), AuthError> {
         if self.room_id == 0 {
@@ -89,11 +112,7 @@ impl WebLiveAuth {
             ));
         }
         for url in &self.urls {
-            if !url.starts_with("wss://") {
-                return Err(AuthError::InvalidOutput(format!(
-                    "invalid WebSocket URL: {url}"
-                )));
-            }
+            validate_ws_url(url)?;
         }
         Ok(())
     }
@@ -119,6 +138,18 @@ pub struct BiliResponse<T> {
     #[serde(default)]
     pub message: Option<String>,
     pub data: Option<T>,
+}
+
+impl<T> BiliResponse<T> {
+    pub fn check_code(self) -> Result<Self, AuthError> {
+        if self.code != 0 {
+            return Err(AuthError::Api {
+                code: self.code,
+                message: self.message.unwrap_or_default(),
+            });
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -272,7 +303,7 @@ pub async fn prepare(
         return Err(AuthError::InvalidOutput("room_id is 0".into()));
     }
 
-    let has_login_cookie = cookie.is_some_and(|c| cookie_value(c, "SESSDATA").is_some());
+    let has_cookie = cookie.is_some_and(|c| !c.trim().is_empty());
 
     let buvid3 = get_buvid3(api, cookie).await?;
     let cookie_header = cookie_with_buvid3(cookie, &buvid3);
@@ -281,7 +312,7 @@ pub async fn prepare(
 
     let (mixin_key, uid, is_login) = fetch_nav_data(api, &cookie_header).await?;
 
-    if has_login_cookie && (!is_login || uid.is_none()) {
+    if has_cookie && (!is_login || uid.is_none()) {
         return Err(AuthError::CookieNotLoggedIn);
     }
 
@@ -296,12 +327,7 @@ pub async fn prepare(
     );
 
     let danmu_resp = api.fetch_danmu_info(&signed, &cookie_header).await?;
-    if danmu_resp.code != 0 {
-        return Err(AuthError::Api {
-            code: danmu_resp.code,
-            message: danmu_resp.message.unwrap_or_default(),
-        });
-    }
+    let danmu_resp = danmu_resp.check_code()?;
     let danmu_data = danmu_resp
         .data
         .ok_or_else(|| AuthError::MissingData("danmuInfo data missing".into()))?;
@@ -309,6 +335,7 @@ pub async fn prepare(
     let urls: Vec<String> = danmu_data
         .host_list
         .iter()
+        .filter(|h| !h.host.is_empty())
         .map(|h| format!("wss://{}:{}/sub", h.host, h.wss_port.unwrap_or(443)))
         .collect();
 
@@ -329,7 +356,7 @@ async fn get_buvid3(api: &dyn BiliApi, cookie: Option<&str>) -> Result<String, A
         return Ok(buvid3);
     }
 
-    let resp = api.fetch_spi().await?;
+    let resp = api.fetch_spi().await?.check_code()?;
     Ok(resp.data.map(|d| d.b_3).unwrap_or_default())
 }
 
@@ -339,6 +366,7 @@ async fn resolve_room_id(
     cookie_header: &str,
 ) -> Result<u64, AuthError> {
     let resp = api.fetch_room_init(room_id, cookie_header).await?;
+    let resp = resp.check_code()?;
     Ok(resp.data.map(|d| d.room_id).unwrap_or(room_id))
 }
 
@@ -346,7 +374,7 @@ async fn fetch_nav_data(
     api: &dyn BiliApi,
     cookie_header: &str,
 ) -> Result<(String, Option<u64>, bool), AuthError> {
-    let nav = api.fetch_nav(cookie_header).await?;
+    let nav = api.fetch_nav(cookie_header).await?.check_code()?;
 
     let nav_data = nav
         .data
@@ -504,6 +532,32 @@ mod tests {
     }
 
     #[test]
+    fn test_web_live_auth_validate_rejects_url_wrong_path() {
+        let auth = WebLiveAuth {
+            uid: Some(123),
+            room_id: 1,
+            key: "token".into(),
+            buvid3: "b3".into(),
+            urls: vec!["wss://example.com:443/ws".into()],
+        };
+        let err = auth.validate().unwrap_err();
+        assert!(matches!(err, AuthError::InvalidOutput(_)));
+        assert!(err.to_string().contains("/sub"));
+    }
+
+    #[test]
+    fn test_web_live_auth_validate_rejects_url_empty_host() {
+        let auth = WebLiveAuth {
+            uid: Some(123),
+            room_id: 1,
+            key: "token".into(),
+            buvid3: "b3".into(),
+            urls: vec!["wss://:443/sub".into()],
+        };
+        assert!(auth.validate().is_err());
+    }
+
+    #[test]
     fn test_web_live_auth_validate_accepts_valid() {
         let auth = WebLiveAuth {
             uid: None,
@@ -513,6 +567,32 @@ mod tests {
             urls: vec!["wss://example.com:443/sub".into()],
         };
         assert!(auth.validate().is_ok());
+    }
+
+    #[test]
+    fn test_bili_response_check_code_success() {
+        let resp: BiliResponse<SpiData> = BiliResponse {
+            code: 0,
+            message: Some("0".into()),
+            data: Some(SpiData { b_3: "test".into() }),
+        };
+        assert!(resp.check_code().is_ok());
+    }
+
+    #[test]
+    fn test_bili_response_check_code_error() {
+        let resp: BiliResponse<SpiData> = BiliResponse {
+            code: -401,
+            message: Some("access denied".into()),
+            data: None,
+        };
+        match resp.check_code().unwrap_err() {
+            AuthError::Api { code, message } => {
+                assert_eq!(code, -401);
+                assert_eq!(message, "access denied");
+            }
+            other => panic!("expected Api error, got {other}"),
+        }
     }
 
     struct MockBiliApi {
@@ -627,7 +707,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prepare_cookie_not_logged_in() {
+    async fn test_prepare_cookie_not_logged_in_with_sessdata() {
         let api = MockBiliApi {
             spi: success_response(SpiData {
                 b_3: "test-buvid3".into(),
@@ -637,6 +717,20 @@ mod tests {
             danmu_info: success_response(fixture_danmu_data()),
         };
         let result = prepare(&api, 12345, Some("SESSDATA=abc"), 1700000000).await;
+        assert!(matches!(result.unwrap_err(), AuthError::CookieNotLoggedIn));
+    }
+
+    #[tokio::test]
+    async fn test_prepare_cookie_not_logged_in_without_sessdata() {
+        let api = MockBiliApi {
+            spi: success_response(SpiData {
+                b_3: "test-buvid3".into(),
+            }),
+            room_init: success_response(RoomInitData { room_id: 12345 }),
+            nav: success_response(fixture_nav_data(false, 0)),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, Some("bili_jct=xyz"), 1700000000).await;
         assert!(matches!(result.unwrap_err(), AuthError::CookieNotLoggedIn));
     }
 
@@ -655,6 +749,64 @@ mod tests {
             AuthError::Api { code, message } => {
                 assert_eq!(code, 60004);
                 assert_eq!(message, "room not found");
+            }
+            other => panic!("expected Api error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_api_error_on_spi() {
+        let api = MockBiliApi {
+            spi: api_error_response(-401, "access denied"),
+            room_init: success_response(RoomInitData { room_id: 12345 }),
+            nav: success_response(fixture_nav_data(false, 0)),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, None, 1700000000).await;
+        match result.unwrap_err() {
+            AuthError::Api { code, message } => {
+                assert_eq!(code, -401);
+                assert_eq!(message, "access denied");
+            }
+            other => panic!("expected Api error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_api_error_on_room_init() {
+        let api = MockBiliApi {
+            spi: success_response(SpiData {
+                b_3: "test-buvid3".into(),
+            }),
+            room_init: api_error_response(60004, "room not found"),
+            nav: success_response(fixture_nav_data(false, 0)),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, None, 1700000000).await;
+        match result.unwrap_err() {
+            AuthError::Api { code, message } => {
+                assert_eq!(code, 60004);
+                assert_eq!(message, "room not found");
+            }
+            other => panic!("expected Api error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_api_error_on_nav() {
+        let api = MockBiliApi {
+            spi: success_response(SpiData {
+                b_3: "test-buvid3".into(),
+            }),
+            room_init: success_response(RoomInitData { room_id: 12345 }),
+            nav: api_error_response(-101, "account not logged in"),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, None, 1700000000).await;
+        match result.unwrap_err() {
+            AuthError::Api { code, message } => {
+                assert_eq!(code, -101);
+                assert_eq!(message, "account not logged in");
             }
             other => panic!("expected Api error, got {other}"),
         }
@@ -710,6 +862,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prepare_empty_host_entry_filtered() {
+        let api = MockBiliApi {
+            spi: success_response(SpiData {
+                b_3: "test-buvid3".into(),
+            }),
+            room_init: success_response(RoomInitData { room_id: 12345 }),
+            nav: success_response(fixture_nav_data(false, 0)),
+            danmu_info: success_response(DanmuInfoData {
+                token: "token".into(),
+                host_list: vec![HostEntry {
+                    host: String::new(),
+                    wss_port: Some(443),
+                }],
+            }),
+        };
+        let result = prepare(&api, 12345, None, 1700000000).await;
+        assert!(matches!(result.unwrap_err(), AuthError::InvalidOutput(_)));
+    }
+
+    #[tokio::test]
     async fn test_prepare_host_entry_default_port() {
         let api = MockBiliApi {
             spi: success_response(SpiData {
@@ -730,7 +902,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prepare_buvid3_from_cookie() {
+    async fn test_prepare_buvid3_from_spi_when_no_cookie() {
         let api = MockBiliApi {
             spi: success_response(SpiData {
                 b_3: "from-spi".into(),
@@ -739,9 +911,39 @@ mod tests {
             nav: success_response(fixture_nav_data(false, 0)),
             danmu_info: success_response(fixture_danmu_data()),
         };
-        let result = prepare(&api, 12345, Some("buvid3=from-cookie"), 1700000000)
-            .await
-            .unwrap();
-        assert_eq!(result.buvid3, "from-cookie");
+        let result = prepare(&api, 12345, None, 1700000000).await.unwrap();
+        assert_eq!(result.buvid3, "from-spi");
+    }
+
+    #[tokio::test]
+    async fn test_prepare_buvid3_cookie_only_rejected_as_not_logged_in() {
+        let api = MockBiliApi {
+            spi: success_response(SpiData {
+                b_3: "from-spi".into(),
+            }),
+            room_init: success_response(RoomInitData { room_id: 12345 }),
+            nav: success_response(fixture_nav_data(false, 0)),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, Some("buvid3=from-cookie"), 1700000000).await;
+        assert!(matches!(result.unwrap_err(), AuthError::CookieNotLoggedIn));
+    }
+
+    #[tokio::test]
+    async fn test_prepare_room_init_fallback_on_missing_data() {
+        let api = MockBiliApi {
+            spi: success_response(SpiData {
+                b_3: "test-buvid3".into(),
+            }),
+            room_init: BiliResponse {
+                code: 0,
+                message: None,
+                data: None,
+            },
+            nav: success_response(fixture_nav_data(false, 0)),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, None, 1700000000).await.unwrap();
+        assert_eq!(result.room_id, 12345);
     }
 }
