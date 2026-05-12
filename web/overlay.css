@@ -3,4 +3,26 @@ body {
     margin: 0;
     padding: 0;
     font-family: sans-serif;
+    color: #fff;
+}
+
+#chat-container {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px;
+}
+
+.chat-item {
+    background: rgba(0, 0, 0, 0.6);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 14px;
+    max-width: 400px;
+    word-break: break-word;
+}
+
+.chat-item.system {
+    color: #aaa;
+    font-style: italic;
 }

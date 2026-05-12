@@ -1,5 +1,7 @@
 use axum::Router;
 
+use super::state::SharedState;
+
 const PANEL_HTML: &str = include_str!("../../web/panel.html");
 const OVERLAY_HTML: &str = include_str!("../../web/overlay.html");
 const PANEL_CSS: &str = include_str!("../../web/panel.css");
@@ -7,7 +9,7 @@ const PANEL_JS: &str = include_str!("../../web/panel.js");
 const OVERLAY_CSS: &str = include_str!("../../web/overlay.css");
 const OVERLAY_JS: &str = include_str!("../../web/overlay.js");
 
-pub fn build_router() -> Router {
+pub fn build_router(state: SharedState) -> Router {
     Router::new()
         .route(
             "/",
@@ -37,4 +39,7 @@ pub fn build_router() -> Router {
                 ([("content-type", "application/javascript")], OVERLAY_JS)
             }),
         )
+        .route("/ws/panel", axum::routing::get(super::ws::panel))
+        .route("/ws/overlay", axum::routing::get(super::ws::overlay))
+        .with_state(state)
 }

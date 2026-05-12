@@ -1,9 +1,4 @@
-mod app;
-mod bilibili;
-mod chat;
-mod config;
-mod overlay;
-
+use bilive_chat::overlay;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -12,7 +7,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let router = overlay::server::build_router();
+    let state = overlay::state::new();
+    overlay::state::spawn_synthetic_messages(state.clone());
+
+    let router = overlay::server::build_router(state);
 
     let addr = "127.0.0.1:7792";
     tracing::info!("starting server on {addr}");
