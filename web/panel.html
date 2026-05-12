@@ -9,7 +9,27 @@
 <body>
     <h1>bilive-chat</h1>
     <div id="status">connecting...</div>
+
+    <h2>Config</h2>
+    <form id="config-form">
+        <label>Host <input type="text" id="cfg-host"></label>
+        <label>Port <input type="number" id="cfg-port"></label>
+        <label>Room ID <input type="number" id="cfg-room"></label>
+        <button type="submit">Save Config</button>
+        <span id="config-status"></span>
+    </form>
+
+    <h2>Login Cookie</h2>
+    <form id="login-form">
+        <label>Cookie <input type="text" id="login-cookie" placeholder="paste cookie here"></label>
+        <button type="submit">Save Cookie</button>
+        <button type="button" id="delete-cookie">Delete Cookie</button>
+        <span id="login-status"></span>
+    </form>
+
+    <h2>Events</h2>
     <div id="messages"></div>
+
     <script src="/panel.js"></script>
 </body>
 </html>
