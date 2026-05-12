@@ -1,5 +1,5 @@
 use axum::extract::Query;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
@@ -121,10 +121,24 @@ async fn delete_login_state(Extension(store): Extension<Arc<ConfigStore>>) -> im
 
 async fn get_overlay_url(
     Extension(store): Extension<Arc<ConfigStore>>,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let config = store.config.lock().unwrap().clone();
     let overlay = &config.overlay;
+
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(|h| h.to_string())
+        .unwrap_or_else(|| {
+            let bind_host = if config.host == "0.0.0.0" {
+                "127.0.0.1"
+            } else {
+                &config.host
+            };
+            format!("{}:{}", bind_host, config.port)
+        });
 
     let max_items = params
         .get("max_items")
@@ -144,8 +158,7 @@ async fn get_overlay_url(
         .unwrap_or(14);
 
     let url = format!(
-        "http://{}:{}/overlay?max_items={}&lifetime={}&show_avatar={}&font_size={}",
-        config.host, config.port, max_items, lifetime, show_avatar, font_size
+        "http://{host}/overlay?max_items={max_items}&lifetime={lifetime}&show_avatar={show_avatar}&font_size={font_size}"
     );
 
     Json(serde_json::json!({ "url": url }))

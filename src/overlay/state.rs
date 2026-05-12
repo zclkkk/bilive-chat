@@ -54,6 +54,17 @@ pub enum DisplayEvent {
     System { text: String },
 }
 
+fn send_event(tx: &broadcast::Sender<String>, event: &DisplayEvent) {
+    match serde_json::to_string(event) {
+        Ok(json) => {
+            let _ = tx.send(json);
+        }
+        Err(e) => {
+            tracing::error!("failed to serialize display event: {e}");
+        }
+    }
+}
+
 const USERNAMES: &[&str] = &[
     "Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Hank", "Ivy", "Jack", "Kate",
     "Leo", "Mia", "Noah", "Olivia", "Paul",
@@ -118,12 +129,14 @@ pub fn spawn_synthetic_messages(state: SharedState) {
         let mut i: usize = 0;
         loop {
             tick.tick().await;
-            let event = DisplayEvent::Normal {
-                sender: pick(USERNAMES, i).to_string(),
-                text: pick(NORMAL_MESSAGES, i + 3).to_string(),
-                avatar_color: pick(AVATAR_COLORS, i).to_string(),
-            };
-            let _ = overlay_tx.send(serde_json::to_string(&event).unwrap());
+            send_event(
+                &overlay_tx,
+                &DisplayEvent::Normal {
+                    sender: pick(USERNAMES, i).to_string(),
+                    text: pick(NORMAL_MESSAGES, i + 3).to_string(),
+                    avatar_color: pick(AVATAR_COLORS, i).to_string(),
+                },
+            );
             i += 1;
         }
     });
@@ -135,13 +148,15 @@ pub fn spawn_synthetic_messages(state: SharedState) {
         loop {
             tick.tick().await;
             let (gift_name, count) = GIFTS[i % GIFTS.len()];
-            let event = DisplayEvent::Gift {
-                sender: pick(USERNAMES, i).to_string(),
-                gift_name: gift_name.to_string(),
-                count,
-                avatar_color: pick(AVATAR_COLORS, i).to_string(),
-            };
-            let _ = overlay_tx.send(serde_json::to_string(&event).unwrap());
+            send_event(
+                &overlay_tx,
+                &DisplayEvent::Gift {
+                    sender: pick(USERNAMES, i).to_string(),
+                    gift_name: gift_name.to_string(),
+                    count,
+                    avatar_color: pick(AVATAR_COLORS, i).to_string(),
+                },
+            );
             i += 1;
         }
     });
@@ -152,14 +167,16 @@ pub fn spawn_synthetic_messages(state: SharedState) {
         let mut i: usize = 200;
         loop {
             tick.tick().await;
-            let event = DisplayEvent::SuperChat {
-                sender: pick(USERNAMES, i).to_string(),
-                text: pick(SUPER_CHAT_TEXTS, i).to_string(),
-                amount: SUPER_CHAT_AMOUNTS[i % SUPER_CHAT_AMOUNTS.len()],
-                currency: "CNY".to_string(),
-                avatar_color: pick(AVATAR_COLORS, i).to_string(),
-            };
-            let _ = overlay_tx.send(serde_json::to_string(&event).unwrap());
+            send_event(
+                &overlay_tx,
+                &DisplayEvent::SuperChat {
+                    sender: pick(USERNAMES, i).to_string(),
+                    text: pick(SUPER_CHAT_TEXTS, i).to_string(),
+                    amount: SUPER_CHAT_AMOUNTS[i % SUPER_CHAT_AMOUNTS.len()],
+                    currency: "CNY".to_string(),
+                    avatar_color: pick(AVATAR_COLORS, i).to_string(),
+                },
+            );
             i += 1;
         }
     });
@@ -171,13 +188,15 @@ pub fn spawn_synthetic_messages(state: SharedState) {
         loop {
             tick.tick().await;
             let (guard_name, count) = GUARDS[i % GUARDS.len()];
-            let event = DisplayEvent::Guard {
-                sender: pick(USERNAMES, i).to_string(),
-                guard_name: guard_name.to_string(),
-                count,
-                avatar_color: pick(AVATAR_COLORS, i).to_string(),
-            };
-            let _ = overlay_tx.send(serde_json::to_string(&event).unwrap());
+            send_event(
+                &overlay_tx,
+                &DisplayEvent::Guard {
+                    sender: pick(USERNAMES, i).to_string(),
+                    guard_name: guard_name.to_string(),
+                    count,
+                    avatar_color: pick(AVATAR_COLORS, i).to_string(),
+                },
+            );
             i += 1;
         }
     });
@@ -194,7 +213,9 @@ pub fn spawn_synthetic_messages(state: SharedState) {
                 "status": "waiting",
                 "message": format!("connected — waiting for events ({count})")
             });
-            let _ = panel_tx.send(msg.to_string());
+            if let Err(e) = panel_tx.send(msg.to_string()) {
+                tracing::error!("panel channel send error: {e}");
+            }
         }
     });
 
@@ -205,10 +226,12 @@ pub fn spawn_synthetic_messages(state: SharedState) {
         loop {
             tick.tick().await;
             count += 1;
-            let event = DisplayEvent::System {
-                text: format!("system event #{count}"),
-            };
-            let _ = overlay_tx.send(serde_json::to_string(&event).unwrap());
+            send_event(
+                &overlay_tx,
+                &DisplayEvent::System {
+                    text: format!("system event #{count}"),
+                },
+            );
         }
     });
 }

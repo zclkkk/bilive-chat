@@ -3,19 +3,26 @@ const params = new URLSearchParams(location.search);
 
 const MAX_ITEMS = parseInt(params.get("max_items"), 10) || 50;
 const LIFETIME = (parseInt(params.get("lifetime"), 10) || 300) * 1000;
-const SHOW_AVATAR = params.get("show_avatar") !== "false";
+const AVATAR_PARAM = params.get("show_avatar");
+const SHOW_AVATAR = AVATAR_PARAM === null ? true : AVATAR_PARAM !== "false" && AVATAR_PARAM !== "0";
 const FONT_SIZE = parseInt(params.get("font_size"), 10) || 14;
 
 document.documentElement.style.fontSize = FONT_SIZE + "px";
 
-const timers = [];
-
-function addChatItem(element) {
+function addItem(element) {
+    const timerId = setTimeout(() => {
+        element.dataset.timerId = "";
+        element.remove();
+    }, LIFETIME);
+    element.dataset.timerId = String(timerId);
     container.appendChild(element);
-    timers.push(setTimeout(() => element.remove(), LIFETIME));
 
     while (container.children.length > MAX_ITEMS) {
-        container.firstChild.remove();
+        const oldest = container.firstElementChild;
+        if (oldest.dataset.timerId) {
+            clearTimeout(Number(oldest.dataset.timerId));
+        }
+        oldest.remove();
     }
 }
 
@@ -46,7 +53,7 @@ function renderNormal(data) {
     body.appendChild(sender);
     body.appendChild(text);
     item.appendChild(body);
-    addChatItem(item);
+    addItem(item);
 }
 
 function renderGift(data) {
@@ -76,7 +83,7 @@ function renderGift(data) {
     body.appendChild(sender);
     body.appendChild(text);
     item.appendChild(body);
-    addChatItem(item);
+    addItem(item);
 }
 
 function renderSuperChat(data) {
@@ -111,7 +118,7 @@ function renderSuperChat(data) {
     body.appendChild(amount);
     body.appendChild(text);
     item.appendChild(body);
-    addChatItem(item);
+    addItem(item);
 }
 
 function renderGuard(data) {
@@ -141,14 +148,14 @@ function renderGuard(data) {
     body.appendChild(sender);
     body.appendChild(text);
     item.appendChild(body);
-    addChatItem(item);
+    addItem(item);
 }
 
 function renderSystem(data) {
     const item = document.createElement("div");
     item.className = "chat-item system";
     item.textContent = data.text;
-    addChatItem(item);
+    addItem(item);
 }
 
 const renderers = {
