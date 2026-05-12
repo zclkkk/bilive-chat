@@ -6,14 +6,17 @@ const LIFETIME = (parseInt(params.get("lifetime"), 10) || 300) * 1000;
 const AVATAR_PARAM = params.get("show_avatar");
 const SHOW_AVATAR = AVATAR_PARAM === null ? true : AVATAR_PARAM !== "false" && AVATAR_PARAM !== "0";
 const FONT_SIZE = parseInt(params.get("font_size"), 10) || 14;
+const FADE_MS = 300;
 
 document.documentElement.style.fontSize = FONT_SIZE + "px";
 
+function removeItem(el) {
+    el.classList.add("fade-out");
+    setTimeout(() => el.remove(), FADE_MS);
+}
+
 function addItem(element) {
-    const timerId = setTimeout(() => {
-        element.dataset.timerId = "";
-        element.remove();
-    }, LIFETIME);
+    const timerId = setTimeout(() => removeItem(element), LIFETIME);
     element.dataset.timerId = String(timerId);
     container.appendChild(element);
 
@@ -26,9 +29,16 @@ function addItem(element) {
     }
 }
 
-function renderNormal(data) {
+function span(className, text) {
+    const el = document.createElement("span");
+    el.className = className;
+    el.textContent = text;
+    return el;
+}
+
+function buildItem(type, data, contentSpans) {
     const item = document.createElement("div");
-    item.className = "chat-item normal";
+    item.className = `chat-item ${type}`;
 
     if (SHOW_AVATAR) {
         const avatar = document.createElement("div");
@@ -41,114 +51,35 @@ function renderNormal(data) {
     const body = document.createElement("div");
     body.className = "body";
 
-    const sender = document.createElement("span");
-    sender.className = "sender";
+    const sender = span("sender", data.sender);
     sender.style.color = data.avatar_color || "#fff";
-    sender.textContent = data.sender;
-
-    const text = document.createElement("span");
-    text.className = "text";
-    text.textContent = data.text;
-
     body.appendChild(sender);
-    body.appendChild(text);
+
+    for (const s of contentSpans) {
+        body.appendChild(s);
+    }
+
     item.appendChild(body);
-    addItem(item);
+    return item;
+}
+
+function renderNormal(data) {
+    addItem(buildItem("normal", data, [span("text", data.text)]));
 }
 
 function renderGift(data) {
-    const item = document.createElement("div");
-    item.className = "chat-item gift";
-
-    if (SHOW_AVATAR) {
-        const avatar = document.createElement("div");
-        avatar.className = "avatar";
-        avatar.style.background = data.avatar_color || "#666";
-        avatar.textContent = (data.sender || "?")[0].toUpperCase();
-        item.appendChild(avatar);
-    }
-
-    const body = document.createElement("div");
-    body.className = "body";
-
-    const sender = document.createElement("span");
-    sender.className = "sender";
-    sender.style.color = data.avatar_color || "#fff";
-    sender.textContent = data.sender;
-
-    const text = document.createElement("span");
-    text.className = "text";
-    text.textContent = `sent ${data.gift_name} x${data.count}`;
-
-    body.appendChild(sender);
-    body.appendChild(text);
-    item.appendChild(body);
-    addItem(item);
+    addItem(buildItem("gift", data, [span("text", `sent ${data.gift_name} x${data.count}`)]));
 }
 
 function renderSuperChat(data) {
-    const item = document.createElement("div");
-    item.className = "chat-item super_chat";
-
-    if (SHOW_AVATAR) {
-        const avatar = document.createElement("div");
-        avatar.className = "avatar";
-        avatar.style.background = data.avatar_color || "#666";
-        avatar.textContent = (data.sender || "?")[0].toUpperCase();
-        item.appendChild(avatar);
-    }
-
-    const body = document.createElement("div");
-    body.className = "body";
-
-    const sender = document.createElement("span");
-    sender.className = "sender";
-    sender.style.color = data.avatar_color || "#fff";
-    sender.textContent = data.sender;
-
-    const amount = document.createElement("span");
-    amount.className = "amount";
-    amount.textContent = `${data.currency} ${data.amount}`;
-
-    const text = document.createElement("span");
-    text.className = "text";
-    text.textContent = data.text;
-
-    body.appendChild(sender);
-    body.appendChild(amount);
-    body.appendChild(text);
-    item.appendChild(body);
-    addItem(item);
+    addItem(buildItem("super_chat", data, [
+        span("amount", `${data.currency} ${data.amount}`),
+        span("text", data.text),
+    ]));
 }
 
 function renderGuard(data) {
-    const item = document.createElement("div");
-    item.className = "chat-item guard";
-
-    if (SHOW_AVATAR) {
-        const avatar = document.createElement("div");
-        avatar.className = "avatar";
-        avatar.style.background = data.avatar_color || "#666";
-        avatar.textContent = (data.sender || "?")[0].toUpperCase();
-        item.appendChild(avatar);
-    }
-
-    const body = document.createElement("div");
-    body.className = "body";
-
-    const sender = document.createElement("span");
-    sender.className = "sender";
-    sender.style.color = data.avatar_color || "#fff";
-    sender.textContent = data.sender;
-
-    const text = document.createElement("span");
-    text.className = "text";
-    text.textContent = `joined as ${data.guard_name} x${data.count}`;
-
-    body.appendChild(sender);
-    body.appendChild(text);
-    item.appendChild(body);
-    addItem(item);
+    addItem(buildItem("guard", data, [span("text", `joined as ${data.guard_name} x${data.count}`)]));
 }
 
 function renderSystem(data) {

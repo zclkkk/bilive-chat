@@ -7,33 +7,60 @@
     <link rel="stylesheet" href="/panel.css">
 </head>
 <body>
-    <h1>bilive-chat</h1>
-    <div id="status">connecting...</div>
+    <header>
+        <h1>bilive-chat</h1>
+        <div id="status" class="status-badge">connecting...</div>
+    </header>
 
-    <h2>OBS Overlay URL</h2>
-    <div id="obs-url-section">
-        <code id="obs-url"></code>
-        <button id="copy-url">Copy</button>
-        <span id="copy-status"></span>
-    </div>
+    <main>
+        <section class="card">
+            <h2>Connection</h2>
+            <div id="conn-info">Not connected</div>
+        </section>
 
-    <h2>Room</h2>
-    <form id="config-form">
-        <label>Room ID <input type="number" id="cfg-room"></label>
-        <button type="submit">Save</button>
-        <span id="config-status"></span>
-    </form>
+        <section class="card">
+            <h2>OBS Overlay URL</h2>
+            <div class="url-row">
+                <code id="obs-url"></code>
+                <button id="copy-url" class="btn btn-small">Copy</button>
+            </div>
+            <span id="copy-status" class="hint"></span>
+        </section>
 
-    <h2>Login Cookie</h2>
-    <form id="login-form">
-        <label>Cookie <input type="text" id="login-cookie" placeholder="paste cookie here"></label>
-        <button type="submit">Save Cookie</button>
-        <button type="button" id="delete-cookie">Delete Cookie</button>
-        <span id="login-status"></span>
-    </form>
+        <section class="card">
+            <h2>Room Config</h2>
+            <form id="config-form">
+                <div class="field">
+                    <label for="cfg-room">Room ID</label>
+                    <input type="number" id="cfg-room" min="0" placeholder="0">
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn">Save</button>
+                    <span id="config-status" class="hint"></span>
+                </div>
+            </form>
+        </section>
 
-    <h2>Events</h2>
-    <div id="messages"></div>
+        <section class="card">
+            <h2>Login Cookie</h2>
+            <form id="login-form">
+                <div class="field">
+                    <label for="login-cookie">Cookie String</label>
+                    <input type="text" id="login-cookie" placeholder="SESSDATA=...; bili_jct=...">
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn">Save Cookie</button>
+                    <button type="button" id="delete-cookie" class="btn btn-danger">Delete</button>
+                    <span id="login-status" class="hint"></span>
+                </div>
+            </form>
+        </section>
+
+        <section class="card">
+            <h2>Event Log</h2>
+            <div id="messages"></div>
+        </section>
+    </main>
 
     <script src="/panel.js"></script>
 </body>

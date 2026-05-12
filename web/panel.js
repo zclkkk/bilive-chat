@@ -1,18 +1,39 @@
-const status = document.getElementById("status");
+const statusBadge = document.getElementById("status");
+const connInfo = document.getElementById("conn-info");
 const messages = document.getElementById("messages");
 
-// WebSocket
+function setStatus(text, state) {
+    statusBadge.textContent = text;
+    statusBadge.className = "status-badge";
+    if (state) {
+        statusBadge.classList.add(state);
+    }
+}
+
+function flashHint(el, text, ms) {
+    el.textContent = text;
+    setTimeout(() => { el.textContent = ""; }, ms || 2000);
+}
+
 function connect() {
     const ws = new WebSocket(`ws://${location.host}/ws/panel`);
 
     ws.onopen = () => {
-        status.textContent = "connected";
+        setStatus("connected", "connected");
+        connInfo.textContent = "WebSocket connected";
     };
 
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
         const div = document.createElement("div");
-        div.textContent = `[${data.type}] ${data.message || data.status || JSON.stringify(data)}`;
+
+        if (data.type === "status") {
+            connInfo.textContent = data.message || data.status || "connected";
+        }
+
+        const tag = data.type || "?";
+        const body = data.message || data.status || JSON.stringify(data);
+        div.textContent = `[${tag}] ${body}`;
         messages.prepend(div);
         while (messages.children.length > 50) {
             messages.lastChild.remove();
@@ -20,7 +41,8 @@ function connect() {
     };
 
     ws.onclose = () => {
-        status.textContent = "disconnected — reconnecting...";
+        setStatus("disconnected", "error");
+        connInfo.textContent = "Disconnected — reconnecting...";
         setTimeout(connect, 2000);
     };
 
@@ -31,7 +53,6 @@ function connect() {
 
 connect();
 
-// OBS URL
 async function loadOverlayUrl() {
     const resp = await fetch("/api/overlay-url");
     const data = await resp.json();
@@ -41,14 +62,11 @@ async function loadOverlayUrl() {
 document.getElementById("copy-url").addEventListener("click", async () => {
     const url = document.getElementById("obs-url").textContent;
     await navigator.clipboard.writeText(url);
-    const cs = document.getElementById("copy-status");
-    cs.textContent = "copied!";
-    setTimeout(() => { cs.textContent = ""; }, 2000);
+    flashHint(document.getElementById("copy-status"), "copied!");
 });
 
 loadOverlayUrl();
 
-// Config (room id only)
 const configForm = document.getElementById("config-form");
 const configStatus = document.getElementById("config-status");
 let currentConfig = {};
@@ -71,14 +89,12 @@ configForm.addEventListener("submit", async (e) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
     });
-    configStatus.textContent = resp.ok ? "saved" : "error";
-    setTimeout(() => { configStatus.textContent = ""; }, 2000);
+    flashHint(configStatus, resp.ok ? "saved" : "error");
     loadOverlayUrl();
 });
 
 loadConfig();
 
-// Login state
 const loginForm = document.getElementById("login-form");
 const loginStatus = document.getElementById("login-status");
 
@@ -91,8 +107,7 @@ loginForm.addEventListener("submit", async (e) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cookie }),
     });
-    loginStatus.textContent = resp.ok ? "saved" : "error";
-    setTimeout(() => { loginStatus.textContent = ""; }, 2000);
+    flashHint(loginStatus, resp.ok ? "saved" : "error");
 });
 
 document.getElementById("delete-cookie").addEventListener("click", async () => {
@@ -100,9 +115,8 @@ document.getElementById("delete-cookie").addEventListener("click", async () => {
     const resp = await fetch("/api/bilibili/login-state", { method: "DELETE" });
     if (resp.ok) {
         document.getElementById("login-cookie").value = "";
-        loginStatus.textContent = "deleted";
+        flashHint(loginStatus, "deleted");
     } else {
-        loginStatus.textContent = "error";
+        flashHint(loginStatus, "error");
     }
-    setTimeout(() => { loginStatus.textContent = ""; }, 2000);
 });
