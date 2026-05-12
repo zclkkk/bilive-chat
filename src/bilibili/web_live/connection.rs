@@ -67,12 +67,13 @@ impl LiveConnection {
                 if let ConnectionInner::Starting(gen) = &*guard {
                     if *gen == generation {
                         *guard = ConnectionInner::Idle;
+                        return Err(match e {
+                            AuthError::CookieNotLoggedIn => StartError::CookieNotLoggedIn,
+                            other => StartError::Auth(other),
+                        });
                     }
                 }
-                return Err(match e {
-                    AuthError::CookieNotLoggedIn => StartError::CookieNotLoggedIn,
-                    other => StartError::Auth(other),
-                });
+                return Err(StartError::Cancelled);
             }
         };
 
@@ -335,16 +336,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_auth_failure_only_resets_matching_generation() {
+    async fn test_auth_failure_returns_cancelled_if_generation_mismatch() {
         let http_client = HttpClient::new();
         let (tx, _) = broadcast::channel(16);
         let conn = LiveConnection::new(http_client, tx);
 
-        {
+        let _old_gen = {
             let mut inner = conn.inner.lock().await;
             let gen = conn.next_generation.fetch_add(1, Ordering::Relaxed);
             *inner = ConnectionInner::Starting(gen);
-        }
+            gen
+        };
 
         conn.stop().await;
 
@@ -357,10 +359,23 @@ mod tests {
         let result = conn.start(0, None).await;
         assert!(
             matches!(result.unwrap_err(), StartError::AlreadyRunning),
-            "start should reject when a newer Starting is active"
+            "start should reject immediately when a newer Starting is active"
         );
 
         conn.stop().await;
+
+        let mut inner = conn.inner.lock().await;
+        *inner = ConnectionInner::Idle;
+        drop(inner);
+
+        let result = conn.start(0, None).await;
+        assert!(
+            matches!(result.unwrap_err(), StartError::Auth(_)),
+            "auth failure with matching generation should return Auth error"
+        );
+
+        let status = conn.status().await;
+        assert!(matches!(status, SocketStatus::Disconnected { error: None }));
     }
 
     #[tokio::test]
