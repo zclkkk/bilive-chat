@@ -2,6 +2,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::state::SharedState;
@@ -14,11 +15,13 @@ const PANEL_JS: &str = include_str!("../../web/panel.js");
 const OVERLAY_CSS: &str = include_str!("../../web/overlay.css");
 const OVERLAY_JS: &str = include_str!("../../web/overlay.js");
 
-pub fn build_router(
-    shared: SharedState,
-    config: Arc<Mutex<Config>>,
-    login_state: Arc<Mutex<LoginState>>,
-) -> Router {
+pub struct AppState {
+    pub config: Mutex<Config>,
+    pub login_state: Mutex<LoginState>,
+    pub data_dir: PathBuf,
+}
+
+pub fn build_router(shared: SharedState, app: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(|| async { axum::response::Html(PANEL_HTML) }))
         .route(
@@ -47,36 +50,39 @@ pub fn build_router(
         .route("/api/config", post(post_config))
         .route("/api/bilibili/login-state", post(post_login_state))
         .route("/api/bilibili/login-state", delete(delete_login_state))
-        .layer(Extension(config))
-        .layer(Extension(login_state))
+        .layer(Extension(app))
         .with_state(shared)
 }
 
-async fn get_config(Extension(config): Extension<Arc<Mutex<Config>>>) -> impl IntoResponse {
-    let config = config.lock().unwrap().clone();
+async fn get_config(Extension(app): Extension<Arc<AppState>>) -> impl IntoResponse {
+    let config = app.config.lock().unwrap().clone();
     Json(config)
 }
 
 async fn post_config(
-    Extension(config): Extension<Arc<Mutex<Config>>>,
+    Extension(app): Extension<Arc<AppState>>,
     Json(new_config): Json<Config>,
 ) -> impl IntoResponse {
-    {
-        let mut config = config.lock().unwrap();
-        *config = new_config.clone();
+    if let Err(e) = new_config.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
     }
-    match new_config.save() {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (
+    if let Err(e) = new_config.save(Path::new(&app.data_dir)) {
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
         )
-            .into_response(),
+            .into_response();
     }
+    *app.config.lock().unwrap() = new_config;
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
 async fn post_login_state(
-    Extension(login): Extension<Arc<Mutex<LoginState>>>,
+    Extension(app): Extension<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let cookie = match body.get("cookie").and_then(|v| v.as_str()) {
@@ -92,47 +98,37 @@ async fn post_login_state(
 
     let state = LoginState {
         cookie,
-        updated: Some(chrono_like_now()),
+        updated: Some(now_secs()),
     };
 
-    {
-        let mut login = login.lock().unwrap();
-        *login = state.clone();
+    if let Err(e) = state.save(Path::new(&app.data_dir)) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
     }
-
+    *app.login_state.lock().unwrap() = state;
     tracing::info!("login state saved");
-    match state.save() {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+async fn delete_login_state(Extension(app): Extension<Arc<AppState>>) -> impl IntoResponse {
+    if let Err(e) = LoginState::delete(Path::new(&app.data_dir)) {
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
         )
-            .into_response(),
+            .into_response();
     }
-}
-
-async fn delete_login_state(
-    Extension(login): Extension<Arc<Mutex<LoginState>>>,
-) -> impl IntoResponse {
-    {
-        let mut login = login.lock().unwrap();
-        *login = LoginState::default();
-    }
-
+    *app.login_state.lock().unwrap() = LoginState::default();
     tracing::info!("login state deleted");
-    match LoginState::delete() {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
-fn chrono_like_now() -> String {
-    let now = std::time::SystemTime::now()
+fn now_secs() -> String {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
-    format!("{}", now.as_secs())
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string())
 }

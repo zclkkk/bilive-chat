@@ -1,14 +1,8 @@
 pub mod types;
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::Path;
 use types::{FilterOptions, OverlayOptions};
-
-fn data_path(name: &str) -> PathBuf {
-    let mut path = PathBuf::from("data");
-    path.push(name);
-    path
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -45,52 +39,71 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load() -> Self {
-        let path = data_path("config.json");
+    pub fn load(data_dir: &Path) -> Result<Self, String> {
+        let path = data_dir.join("config.json");
         match std::fs::read_to_string(&path) {
-            Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Ok(data) => {
+                let config: Config =
+                    serde_json::from_str(&data).map_err(|e| format!("invalid config: {e}"))?;
+                config.validate()?;
+                Ok(config)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(format!("failed to read config: {e}")),
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let path = data_path("config.json");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
+    pub fn save(&self, data_dir: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
+        let path = data_dir.join("config.json");
         let data = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(path, data).map_err(|e| e.to_string())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.host.is_empty() {
+            return Err("host must not be empty".into());
+        }
+        if self.port == 0 {
+            return Err("port must not be 0".into());
+        }
+        if self.overlay.max_items == 0 {
+            return Err("overlay.max_items must not be 0".into());
+        }
+        if self.overlay.message_lifetime_secs == 0 {
+            return Err("overlay.message_lifetime_secs must not be 0".into());
+        }
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LoginState {
-    #[serde(default)]
     pub cookie: String,
-    #[serde(default)]
     pub updated: Option<String>,
 }
 
 impl LoginState {
-    pub fn load() -> Self {
-        let path = data_path("login-state.json");
+    pub fn load(data_dir: &Path) -> Result<Self, String> {
+        let path = data_dir.join("login-state.json");
         match std::fs::read_to_string(&path) {
-            Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Ok(data) => {
+                serde_json::from_str(&data).map_err(|e| format!("invalid login state: {e}"))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(format!("failed to read login state: {e}")),
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let path = data_path("login-state.json");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
+    pub fn save(&self, data_dir: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
+        let path = data_dir.join("login-state.json");
         let data = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(path, data).map_err(|e| e.to_string())
     }
 
-    pub fn delete() -> Result<(), String> {
-        let path = data_path("login-state.json");
+    pub fn delete(data_dir: &Path) -> Result<(), String> {
+        let path = data_dir.join("login-state.json");
         match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
