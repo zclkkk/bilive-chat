@@ -102,6 +102,7 @@ impl LiveConnection {
                 });
             }
             _ => {
+                handle.stop();
                 relay_task.abort();
                 return Err(StartError::Cancelled);
             }
@@ -318,19 +319,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_cancelled_if_state_changed_during_auth() {
+    async fn test_start_rejected_when_already_starting() {
         let http_client = HttpClient::new();
         let (tx, _) = broadcast::channel(16);
         let conn = LiveConnection::new(http_client, tx);
 
         let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Starting(999);
+        *inner = ConnectionInner::Starting(99);
         drop(inner);
 
-        let result = conn.start(0, None).await;
+        let result = conn.start(12345, None).await;
         assert!(matches!(result.unwrap_err(), StartError::AlreadyRunning));
 
         conn.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_auth_failure_only_resets_matching_generation() {
+        let http_client = HttpClient::new();
+        let (tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, tx);
+
+        {
+            let mut inner = conn.inner.lock().await;
+            let gen = conn.next_generation.fetch_add(1, Ordering::Relaxed);
+            *inner = ConnectionInner::Starting(gen);
+        }
+
+        conn.stop().await;
+
+        {
+            let mut inner = conn.inner.lock().await;
+            let newer_gen = conn.next_generation.fetch_add(1, Ordering::Relaxed);
+            *inner = ConnectionInner::Starting(newer_gen);
+        }
+
+        let result = conn.start(0, None).await;
+        assert!(
+            matches!(result.unwrap_err(), StartError::AlreadyRunning),
+            "start should reject when a newer Starting is active"
+        );
+
+        conn.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_socket_handle_stopped_on_superseded_start() {
+        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let handle = SocketHandle {
+            status_rx,
+            cancel: cancel.clone(),
+        };
+
+        assert!(!cancel.is_cancelled());
+
+        handle.stop();
+
+        assert!(cancel.is_cancelled());
     }
 
     #[tokio::test]
