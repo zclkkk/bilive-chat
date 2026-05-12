@@ -31,6 +31,23 @@ function connect() {
 
 connect();
 
+// OBS URL
+async function loadOverlayUrl() {
+    const resp = await fetch("/api/overlay-url");
+    const data = await resp.json();
+    document.getElementById("obs-url").textContent = data.url;
+}
+
+document.getElementById("copy-url").addEventListener("click", async () => {
+    const url = document.getElementById("obs-url").textContent;
+    await navigator.clipboard.writeText(url);
+    const cs = document.getElementById("copy-status");
+    cs.textContent = "copied!";
+    setTimeout(() => { cs.textContent = ""; }, 2000);
+});
+
+loadOverlayUrl();
+
 // Config (room id only)
 const configForm = document.getElementById("config-form");
 const configStatus = document.getElementById("config-status");
@@ -56,6 +73,7 @@ configForm.addEventListener("submit", async (e) => {
     });
     configStatus.textContent = resp.ok ? "saved" : "error";
     setTimeout(() => { configStatus.textContent = ""; }, 2000);
+    loadOverlayUrl();
 });
 
 loadConfig();

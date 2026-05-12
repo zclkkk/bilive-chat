@@ -18,6 +18,29 @@ h2 {
     border-radius: 4px;
 }
 
+#obs-url-section {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+#obs-url {
+    background: #2a2a2a;
+    padding: 0.4rem 0.6rem;
+    border-radius: 3px;
+    font-size: 0.85rem;
+    color: #8cf;
+    word-break: break-all;
+    flex: 1;
+    min-width: 0;
+}
+
+#copy-status {
+    color: #8f8;
+    font-size: 0.85rem;
+}
+
 form {
     display: flex;
     flex-direction: column;

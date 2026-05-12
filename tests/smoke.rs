@@ -117,25 +117,62 @@ async fn ws_panel_accepts_client() {
 }
 
 #[tokio::test]
-async fn ws_overlay_accepts_client() {
+async fn ws_overlay_receives_display_events() {
     let (base, _port, _dir) = spawn_server().await;
     let ws_url = base.replace("http://", "ws://") + "/ws/overlay";
     let (mut ws, _) = connect_async(&ws_url).await.unwrap();
 
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
-        .await
-        .expect("timeout waiting for overlay message")
-        .unwrap()
-        .unwrap();
+    let mut seen_types = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
 
-    let text = match msg {
-        tokio_tungstenite::tungstenite::Message::Text(t) => t,
-        other => panic!("expected text, got {other:?}"),
-    };
+    while seen_types.len() < 3 && tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout(deadline - tokio::time::Instant::now(), ws.next())
+            .await
+            .expect("timeout waiting for overlay events")
+            .unwrap()
+            .unwrap();
 
-    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(parsed["type"], "display");
-    assert!(parsed["text"].as_str().unwrap().contains("system event"));
+        let text = match msg {
+            tokio_tungstenite::tungstenite::Message::Text(t) => t,
+            other => panic!("expected text, got {other:?}"),
+        };
+
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let event_type = parsed["type"].as_str().unwrap().to_string();
+        seen_types.insert(event_type.clone());
+
+        match event_type.as_str() {
+            "normal" => {
+                assert!(parsed["sender"].as_str().is_some());
+                assert!(parsed["text"].as_str().is_some());
+                assert!(parsed["avatar_color"].as_str().is_some());
+            }
+            "gift" => {
+                assert!(parsed["sender"].as_str().is_some());
+                assert!(parsed["gift_name"].as_str().is_some());
+                assert!(parsed["count"].as_u64().is_some());
+            }
+            "super_chat" => {
+                assert!(parsed["sender"].as_str().is_some());
+                assert!(parsed["amount"].as_u64().is_some());
+                assert!(parsed["currency"].as_str().is_some());
+            }
+            "guard" => {
+                assert!(parsed["sender"].as_str().is_some());
+                assert!(parsed["guard_name"].as_str().is_some());
+                assert!(parsed["count"].as_u64().is_some());
+            }
+            "system" => {
+                assert!(parsed["text"].as_str().is_some());
+            }
+            other => panic!("unexpected event type: {other}"),
+        }
+    }
+
+    assert!(
+        seen_types.len() >= 3,
+        "expected at least 3 distinct event types, got: {seen_types:?}"
+    );
 }
 
 // Config API tests
@@ -329,4 +366,39 @@ fn config_validate_rejects_zero_port() {
         ..Config::default()
     };
     assert!(cfg.validate().is_err());
+}
+
+// Overlay URL API tests
+
+#[tokio::test]
+async fn api_overlay_url_returns_default() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(port, "GET", "/api/overlay-url", "").await;
+    assert_eq!(status, 200);
+    let body = response_body(&resp);
+    let data: serde_json::Value = serde_json::from_str(body).unwrap();
+    let url = data["url"].as_str().unwrap();
+    assert!(url.contains("/overlay?"));
+    assert!(url.contains("max_items=50"));
+    assert!(url.contains("lifetime=300"));
+    assert!(url.contains("show_avatar=true"));
+    assert!(url.contains("font_size=14"));
+}
+
+#[tokio::test]
+async fn api_overlay_url_with_query_params() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(
+        port,
+        "GET",
+        "/api/overlay-url?max_items=10&font_size=18",
+        "",
+    )
+    .await;
+    assert_eq!(status, 200);
+    let body = response_body(&resp);
+    let data: serde_json::Value = serde_json::from_str(body).unwrap();
+    let url = data["url"].as_str().unwrap();
+    assert!(url.contains("max_items=10"));
+    assert!(url.contains("font_size=18"));
 }

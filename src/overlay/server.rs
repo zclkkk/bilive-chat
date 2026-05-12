@@ -1,7 +1,9 @@
+use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::state::SharedState;
@@ -43,6 +45,7 @@ pub fn build_router(shared: SharedState, store: Arc<ConfigStore>) -> Router {
         .route("/api/config", post(post_config))
         .route("/api/bilibili/login-state", post(post_login_state))
         .route("/api/bilibili/login-state", delete(delete_login_state))
+        .route("/api/overlay-url", get(get_overlay_url))
         .layer(Extension(store))
         .with_state(shared)
 }
@@ -114,6 +117,38 @@ async fn delete_login_state(Extension(store): Extension<Arc<ConfigStore>>) -> im
     }
     tracing::info!("login state deleted");
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+async fn get_overlay_url(
+    Extension(store): Extension<Arc<ConfigStore>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let config = store.config.lock().unwrap().clone();
+    let overlay = &config.overlay;
+
+    let max_items = params
+        .get("max_items")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(overlay.max_items);
+    let lifetime = params
+        .get("lifetime")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(overlay.message_lifetime_secs);
+    let show_avatar = params
+        .get("show_avatar")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(overlay.show_avatar);
+    let font_size = params
+        .get("font_size")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(14);
+
+    let url = format!(
+        "http://{}:{}/overlay?max_items={}&lifetime={}&show_avatar={}&font_size={}",
+        config.host, config.port, max_items, lifetime, show_avatar, font_size
+    );
+
+    Json(serde_json::json!({ "url": url }))
 }
 
 fn now_secs() -> String {
