@@ -1,11 +1,20 @@
 const container = document.getElementById("chat-container");
 const params = new URLSearchParams(location.search);
 
-const MAX_ITEMS = parseInt(params.get("max_items"), 10) || 50;
-const LIFETIME = (parseInt(params.get("lifetime"), 10) || 300) * 1000;
+function intParam(name, fallback, min, max) {
+    const parsed = parseInt(params.get(name), 10);
+    return clamp(Number.isFinite(parsed) ? parsed : fallback, min, max);
+}
+
+function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+}
+
+const MAX_ITEMS = intParam("max_items", 50, 1, 200);
+const LIFETIME = intParam("lifetime", 300, 1, 3600) * 1000;
 const AVATAR_PARAM = params.get("show_avatar");
 const SHOW_AVATAR = AVATAR_PARAM === null ? true : AVATAR_PARAM !== "false" && AVATAR_PARAM !== "0";
-const FONT_SIZE = parseInt(params.get("font_size"), 10) || 14;
+const FONT_SIZE = intParam("font_size", 14, 8, 48);
 const FADE_MS = 300;
 
 document.documentElement.style.fontSize = FONT_SIZE + "px";

@@ -375,6 +375,60 @@ async fn api_overlay_url_uses_host_header() {
 }
 
 #[tokio::test]
+async fn api_overlay_url_clamps_max_items_low() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(port, "GET", "/api/overlay-url?max_items=0", "").await;
+    assert_eq!(status, 200);
+    let data: serde_json::Value = serde_json::from_str(response_body(&resp)).unwrap();
+    assert!(data["url"].as_str().unwrap().contains("max_items=1"));
+}
+
+#[tokio::test]
+async fn api_overlay_url_clamps_max_items_high() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(port, "GET", "/api/overlay-url?max_items=999", "").await;
+    assert_eq!(status, 200);
+    let data: serde_json::Value = serde_json::from_str(response_body(&resp)).unwrap();
+    assert!(data["url"].as_str().unwrap().contains("max_items=200"));
+}
+
+#[tokio::test]
+async fn api_overlay_url_clamps_lifetime_low() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(port, "GET", "/api/overlay-url?lifetime=0", "").await;
+    assert_eq!(status, 200);
+    let data: serde_json::Value = serde_json::from_str(response_body(&resp)).unwrap();
+    assert!(data["url"].as_str().unwrap().contains("lifetime=1"));
+}
+
+#[tokio::test]
+async fn api_overlay_url_clamps_lifetime_high() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(port, "GET", "/api/overlay-url?lifetime=9999", "").await;
+    assert_eq!(status, 200);
+    let data: serde_json::Value = serde_json::from_str(response_body(&resp)).unwrap();
+    assert!(data["url"].as_str().unwrap().contains("lifetime=3600"));
+}
+
+#[tokio::test]
+async fn api_overlay_url_clamps_font_size_low() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(port, "GET", "/api/overlay-url?font_size=1", "").await;
+    assert_eq!(status, 200);
+    let data: serde_json::Value = serde_json::from_str(response_body(&resp)).unwrap();
+    assert!(data["url"].as_str().unwrap().contains("font_size=8"));
+}
+
+#[tokio::test]
+async fn api_overlay_url_clamps_font_size_high() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(port, "GET", "/api/overlay-url?font_size=99", "").await;
+    assert_eq!(status, 200);
+    let data: serde_json::Value = serde_json::from_str(response_body(&resp)).unwrap();
+    assert!(data["url"].as_str().unwrap().contains("font_size=48"));
+}
+
+#[tokio::test]
 async fn api_overlay_url_show_avatar_zero_is_false() {
     let (_base, port, _dir) = spawn_server().await;
     let (status, resp) = http_request(port, "GET", "/api/overlay-url?show_avatar=0", "").await;
