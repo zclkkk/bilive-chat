@@ -1,5 +1,5 @@
 use bilive_chat::bilibili::web_live::{HttpClient, LiveConnection};
-use bilive_chat::config::{Config, ConfigStore, LoginState};
+use bilive_chat::config::{Config, ConfigStore, FilterOptions, LoginState};
 use bilive_chat::overlay::state::AppState;
 use bilive_chat::overlay::{server, state};
 use std::path::PathBuf;
@@ -26,17 +26,19 @@ async fn spawn_server() -> (String, u16, PathBuf) {
     let shared = state::new();
 
     let store = Arc::new(ConfigStore::new(data_dir.clone()));
+    let (filter_tx, filter_rx) = tokio::sync::watch::channel(FilterOptions::default());
     let http_client = HttpClient::new();
     let live = LiveConnection::new(
         http_client,
         shared.panel_tx.clone(),
         shared.overlay_tx.clone(),
-        store.clone(),
+        filter_rx,
     );
     let app_state = AppState {
         shared,
         store,
         live,
+        filter_tx,
     };
     let router = server::build_router(app_state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -1,8 +1,8 @@
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 use crate::bilibili::web_live::LiveConnection;
-use crate::config::ConfigStore;
+use crate::config::{ConfigStore, FilterOptions};
 
 use super::event::{OverlayEvent, PanelEvent};
 
@@ -27,6 +27,7 @@ pub struct AppState {
     pub shared: SharedState,
     pub store: Arc<ConfigStore>,
     pub live: Arc<LiveConnection>,
+    pub filter_tx: watch::Sender<FilterOptions>,
 }
 
 pub fn new() -> SharedState {

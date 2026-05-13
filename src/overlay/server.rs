@@ -130,7 +130,7 @@ async fn post_filter(
 ) -> impl IntoResponse {
     new_filter.normalize();
     let mut config = state.store.config.lock().unwrap().clone();
-    config.filter = new_filter;
+    config.filter = new_filter.clone();
     if let Err(e) = state.store.save_config(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -138,6 +138,7 @@ async fn post_filter(
         )
             .into_response();
     }
+    let _ = state.filter_tx.send(new_filter);
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 

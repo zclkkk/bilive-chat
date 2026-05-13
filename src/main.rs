@@ -26,18 +26,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let shared = overlay::state::new();
 
+    let (filter_tx, filter_rx) = tokio::sync::watch::channel(config.filter.clone());
+
     let http_client = HttpClient::new();
     let live = LiveConnection::new(
         http_client,
         shared.panel_tx.clone(),
         shared.overlay_tx.clone(),
-        store.clone(),
+        filter_rx,
     );
 
     let app_state = AppState {
         shared,
         store,
         live,
+        filter_tx,
     };
 
     let router = overlay::server::build_router(app_state);
