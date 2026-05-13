@@ -471,3 +471,21 @@ async fn api_filter_persists_to_config() {
         serde_json::json!(["forbidden"])
     );
 }
+
+#[tokio::test]
+async fn api_filter_normalizes_empty_and_whitespace_entries() {
+    let (_base, port, _dir) = spawn_server().await;
+    let body = serde_json::json!({
+        "blocked_users": ["Alice", "", "  ", "  Bob  "],
+        "blocked_keywords": ["bad", "", "  ", "  spam  "]
+    })
+    .to_string();
+    let (status, _) = http_request(port, "POST", "/api/filter", &body).await;
+    assert_eq!(status, 200);
+
+    let (status, resp) = http_request(port, "GET", "/api/filter", "").await;
+    assert_eq!(status, 200);
+    let data: serde_json::Value = serde_json::from_str(response_body(&resp)).unwrap();
+    assert_eq!(data["blocked_users"], serde_json::json!(["Alice", "Bob"]));
+    assert_eq!(data["blocked_keywords"], serde_json::json!(["bad", "spam"]));
+}

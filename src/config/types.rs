@@ -39,3 +39,20 @@ pub struct FilterOptions {
     #[serde(default)]
     pub blocked_keywords: Vec<String>,
 }
+
+impl FilterOptions {
+    pub fn normalize(&mut self) {
+        self.blocked_users = self
+            .blocked_users
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self.blocked_keywords = self
+            .blocked_keywords
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+}

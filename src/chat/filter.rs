@@ -6,11 +6,19 @@ pub struct ChatFilter {
     blocked_keywords: Vec<String>,
 }
 
+fn normalize_entries(entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 impl ChatFilter {
     pub fn new(options: &FilterOptions) -> Self {
         Self {
-            blocked_users: options.blocked_users.clone(),
-            blocked_keywords: options.blocked_keywords.clone(),
+            blocked_users: normalize_entries(&options.blocked_users),
+            blocked_keywords: normalize_entries(&options.blocked_keywords),
         }
     }
 
@@ -237,5 +245,71 @@ mod tests {
         assert!(f.should_block(&event_user));
         assert!(f.should_block(&event_kw));
         assert!(!f.should_block(&event_ok));
+    }
+
+    #[test]
+    fn test_empty_keyword_does_not_block_normal() {
+        let f = filter(&[], &[""]);
+        let event = ChatEvent::Normal {
+            sender: "Alice".into(),
+            text: "hello".into(),
+            uid: 1,
+        };
+        assert!(!f.should_block(&event));
+    }
+
+    #[test]
+    fn test_whitespace_keyword_does_not_block_normal() {
+        let f = filter(&[], &["  "]);
+        let event = ChatEvent::Normal {
+            sender: "Alice".into(),
+            text: "hello".into(),
+            uid: 1,
+        };
+        assert!(!f.should_block(&event));
+    }
+
+    #[test]
+    fn test_empty_user_does_not_block() {
+        let f = filter(&[""], &[]);
+        let event = ChatEvent::Normal {
+            sender: "Alice".into(),
+            text: "hello".into(),
+            uid: 1,
+        };
+        assert!(!f.should_block(&event));
+    }
+
+    #[test]
+    fn test_whitespace_user_does_not_block() {
+        let f = filter(&["  "], &[]);
+        let event = ChatEvent::Normal {
+            sender: "Alice".into(),
+            text: "hello".into(),
+            uid: 1,
+        };
+        assert!(!f.should_block(&event));
+    }
+
+    #[test]
+    fn test_trimmed_keyword_matches() {
+        let f = filter(&[], &["  bad  "]);
+        let event = ChatEvent::Normal {
+            sender: "Alice".into(),
+            text: "this is bad".into(),
+            uid: 1,
+        };
+        assert!(f.should_block(&event));
+    }
+
+    #[test]
+    fn test_trimmed_user_matches() {
+        let f = filter(&["  Spammer  "], &[]);
+        let event = ChatEvent::Normal {
+            sender: "Spammer".into(),
+            text: "hello".into(),
+            uid: 1,
+        };
+        assert!(f.should_block(&event));
     }
 }

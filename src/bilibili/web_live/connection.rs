@@ -213,11 +213,15 @@ pub enum StartError {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn test_store() -> Arc<ConfigStore> {
-        Arc::new(ConfigStore::new(PathBuf::from(
-            "/tmp/bilive-chat-test-filter",
-        )))
+        let id = TEST_DIR_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        Arc::new(ConfigStore::new(PathBuf::from(format!(
+            "/tmp/bilive-chat-test-filter-{id}"
+        ))))
     }
 
     #[tokio::test]

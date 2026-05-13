@@ -133,8 +133,9 @@ async fn get_filter(Extension(store): Extension<Arc<ConfigStore>>) -> impl IntoR
 
 async fn post_filter(
     Extension(store): Extension<Arc<ConfigStore>>,
-    Json(new_filter): Json<FilterOptions>,
+    Json(mut new_filter): Json<FilterOptions>,
 ) -> impl IntoResponse {
+    new_filter.normalize();
     let mut config = store.config.lock().unwrap().clone();
     config.filter = new_filter;
     if let Err(e) = store.save_config(&config) {
