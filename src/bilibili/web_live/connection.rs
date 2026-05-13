@@ -225,6 +225,24 @@ mod tests {
         rx
     }
 
+    fn test_socket_handle() -> SocketHandle {
+        let (_status_tx, status_rx) =
+            tokio::sync::watch::channel(SocketStatus::Disconnected { error: None });
+        test_socket_handle_with_status(status_rx)
+    }
+
+    fn test_socket_handle_with_status(
+        status_rx: tokio::sync::watch::Receiver<SocketStatus>,
+    ) -> SocketHandle {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(async {});
+        SocketHandle {
+            status_rx,
+            cancel,
+            abort_handle: task.abort_handle(),
+        }
+    }
+
     #[tokio::test]
     async fn test_status_disconnected_when_idle() {
         let http_client = HttpClient::new();
@@ -266,9 +284,7 @@ mod tests {
         let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, test_filter_rx());
 
         let mut inner = conn.inner.lock().await;
-        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let handle = SocketHandle { status_rx, cancel };
+        let handle = test_socket_handle();
         let relay_task = tokio::spawn(async {});
         *inner = ConnectionInner::Active(ActiveConnection {
             handle,
@@ -423,19 +439,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancelled_socket_handle_stopped_on_superseded_start() {
-        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let handle = SocketHandle {
-            status_rx,
-            cancel: cancel.clone(),
-        };
+    async fn test_socket_handle_stop_cancels_and_aborts() {
+        let handle = test_socket_handle();
 
-        assert!(!cancel.is_cancelled());
+        assert!(!handle.is_cancelled());
 
         handle.stop();
 
-        assert!(cancel.is_cancelled());
+        assert!(handle.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_socket_handle_stop_aborts_spawned_task() {
+        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_clone = started.clone();
+        let task = tokio::spawn(async move {
+            started_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            std::future::pending::<()>().await;
+        });
+        let handle = SocketHandle {
+            status_rx,
+            cancel,
+            abort_handle: task.abort_handle(),
+        };
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(started.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!task.is_finished());
+
+        handle.stop();
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(task.is_finished());
     }
 
     #[tokio::test]
@@ -459,10 +496,7 @@ mod tests {
 
         let mut inner = conn.inner.lock().await;
         *inner = ConnectionInner::Active(ActiveConnection {
-            handle: SocketHandle {
-                status_rx: status_tx.subscribe(),
-                cancel: tokio_util::sync::CancellationToken::new(),
-            },
+            handle: test_socket_handle_with_status(status_tx.subscribe()),
             relay_task,
             generation,
         });
@@ -497,10 +531,9 @@ mod tests {
 
         let mut inner = conn.inner.lock().await;
         *inner = ConnectionInner::Active(ActiveConnection {
-            handle: SocketHandle {
-                status_rx: tokio::sync::watch::channel(SocketStatus::Connected {}).1,
-                cancel: tokio_util::sync::CancellationToken::new(),
-            },
+            handle: test_socket_handle_with_status(
+                tokio::sync::watch::channel(SocketStatus::Connected {}).1,
+            ),
             relay_task,
             generation,
         });
@@ -551,10 +584,9 @@ mod tests {
 
         let mut inner = conn.inner.lock().await;
         *inner = ConnectionInner::Active(ActiveConnection {
-            handle: SocketHandle {
-                status_rx: tokio::sync::watch::channel(SocketStatus::Connected {}).1,
-                cancel: tokio_util::sync::CancellationToken::new(),
-            },
+            handle: test_socket_handle_with_status(
+                tokio::sync::watch::channel(SocketStatus::Connected {}).1,
+            ),
             relay_task,
             generation,
         });
@@ -600,10 +632,9 @@ mod tests {
 
         let mut inner = conn.inner.lock().await;
         *inner = ConnectionInner::Active(ActiveConnection {
-            handle: SocketHandle {
-                status_rx: tokio::sync::watch::channel(SocketStatus::Connected {}).1,
-                cancel: tokio_util::sync::CancellationToken::new(),
-            },
+            handle: test_socket_handle_with_status(
+                tokio::sync::watch::channel(SocketStatus::Connected {}).1,
+            ),
             relay_task,
             generation,
         });
@@ -657,10 +688,9 @@ mod tests {
 
         let mut inner = conn.inner.lock().await;
         *inner = ConnectionInner::Active(ActiveConnection {
-            handle: SocketHandle {
-                status_rx: tokio::sync::watch::channel(SocketStatus::Connected {}).1,
-                cancel: tokio_util::sync::CancellationToken::new(),
-            },
+            handle: test_socket_handle_with_status(
+                tokio::sync::watch::channel(SocketStatus::Connected {}).1,
+            ),
             relay_task,
             generation,
         });
@@ -711,10 +741,9 @@ mod tests {
 
         let mut inner = conn.inner.lock().await;
         *inner = ConnectionInner::Active(ActiveConnection {
-            handle: SocketHandle {
-                status_rx: tokio::sync::watch::channel(SocketStatus::Connected {}).1,
-                cancel: tokio_util::sync::CancellationToken::new(),
-            },
+            handle: test_socket_handle_with_status(
+                tokio::sync::watch::channel(SocketStatus::Connected {}).1,
+            ),
             relay_task,
             generation,
         });

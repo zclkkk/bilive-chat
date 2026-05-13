@@ -29,11 +29,13 @@ pub enum SocketStatus {
 pub struct SocketHandle {
     pub status_rx: tokio::sync::watch::Receiver<SocketStatus>,
     pub(crate) cancel: tokio_util::sync::CancellationToken,
+    pub(crate) abort_handle: tokio::task::AbortHandle,
 }
 
 impl SocketHandle {
     pub fn stop(&self) {
         self.cancel.cancel();
+        self.abort_handle.abort();
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -47,12 +49,14 @@ pub fn connect(auth: WebLiveAuth) -> (SocketHandle, mpsc::Receiver<serde_json::V
     let (command_tx, command_rx) = mpsc::channel(256);
     let cancel = tokio_util::sync::CancellationToken::new();
 
+    let task = tokio::spawn(run_connection(auth, status_tx, command_tx, cancel.clone()));
+    let abort_handle = task.abort_handle();
+
     let handle = SocketHandle {
         status_rx,
-        cancel: cancel.clone(),
+        cancel,
+        abort_handle,
     };
-
-    tokio::spawn(run_connection(auth, status_tx, command_tx, cancel));
 
     (handle, command_rx)
 }
