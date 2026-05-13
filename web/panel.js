@@ -91,9 +91,17 @@ connect();
 async function fetchStatus() {
     try {
         const resp = await fetch("/api/bilibili/status");
+        if (!resp.ok) {
+            logEvent("status", "fetch failed: HTTP " + resp.status);
+            return null;
+        }
         const status = await resp.json();
         updateConnectionUI(status);
-    } catch (_) {}
+        return status;
+    } catch (e) {
+        logEvent("status", "fetch error: " + (e.message || e));
+        return null;
+    }
 }
 
 fetchStatus();
@@ -101,31 +109,44 @@ fetchStatus();
 btnStart.addEventListener("click", async () => {
     updateConnectionUI({ type: "connecting" });
     connError.textContent = "";
+    logEvent("panel", "start requested");
     try {
         const resp = await fetch("/api/bilibili/start", { method: "POST" });
-        if (!resp.ok) {
-            const data = await resp.json();
-            connError.textContent = data.error || "start failed";
+        if (resp.ok) {
+            logEvent("panel", "start ok");
+        } else {
+            const data = await resp.json().catch(() => ({}));
+            const error = data.error || "start failed";
+            connError.textContent = error;
+            logEvent("panel", "start failed: " + error);
         }
     } catch (e) {
-        connError.textContent = e.message || "network error";
+        const error = e.message || "network error";
+        connError.textContent = error;
+        logEvent("panel", "start failed: " + error);
     }
-    fetchStatus();
+    await fetchStatus();
 });
 
 btnStop.addEventListener("click", async () => {
-    btnStop.disabled = true;
     connError.textContent = "";
+    logEvent("panel", "stop requested");
     try {
         const resp = await fetch("/api/bilibili/stop", { method: "POST" });
-        if (!resp.ok) {
-            const data = await resp.json();
-            connError.textContent = data.error || "stop failed";
+        if (resp.ok) {
+            logEvent("panel", "stop ok");
+        } else {
+            const data = await resp.json().catch(() => ({}));
+            const error = data.error || "stop failed";
+            connError.textContent = error;
+            logEvent("panel", "stop failed: " + error);
         }
     } catch (e) {
-        connError.textContent = e.message || "network error";
+        const error = e.message || "network error";
+        connError.textContent = error;
+        logEvent("panel", "stop failed: " + error);
     }
-    fetchStatus();
+    await fetchStatus();
 });
 
 async function loadOverlayUrl() {

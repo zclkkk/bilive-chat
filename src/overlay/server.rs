@@ -23,26 +23,65 @@ pub fn build_router(
     live: Arc<LiveConnection>,
 ) -> Router {
     Router::new()
-        .route("/", get(|| async { axum::response::Html(PANEL_HTML) }))
+        .route(
+            "/",
+            get(|| async {
+                (
+                    [("cache-control", "no-store")],
+                    axum::response::Html(PANEL_HTML),
+                )
+            }),
+        )
         .route(
             "/overlay",
-            get(|| async { axum::response::Html(OVERLAY_HTML) }),
+            get(|| async {
+                (
+                    [("cache-control", "no-store")],
+                    axum::response::Html(OVERLAY_HTML),
+                )
+            }),
         )
         .route(
             "/panel.css",
-            get(|| async { ([("content-type", "text/css")], PANEL_CSS) }),
+            get(|| async {
+                (
+                    [("cache-control", "no-store"), ("content-type", "text/css")],
+                    PANEL_CSS,
+                )
+            }),
         )
         .route(
             "/panel.js",
-            get(|| async { ([("content-type", "application/javascript")], PANEL_JS) }),
+            get(|| async {
+                (
+                    [
+                        ("cache-control", "no-store"),
+                        ("content-type", "application/javascript"),
+                    ],
+                    PANEL_JS,
+                )
+            }),
         )
         .route(
             "/overlay.css",
-            get(|| async { ([("content-type", "text/css")], OVERLAY_CSS) }),
+            get(|| async {
+                (
+                    [("cache-control", "no-store"), ("content-type", "text/css")],
+                    OVERLAY_CSS,
+                )
+            }),
         )
         .route(
             "/overlay.js",
-            get(|| async { ([("content-type", "application/javascript")], OVERLAY_JS) }),
+            get(|| async {
+                (
+                    [
+                        ("cache-control", "no-store"),
+                        ("content-type", "application/javascript"),
+                    ],
+                    OVERLAY_JS,
+                )
+            }),
         )
         .route("/ws/panel", get(super::ws::panel))
         .route("/ws/overlay", get(super::ws::overlay))
@@ -222,11 +261,13 @@ async fn get_overlay_url(
     let max_items = params
         .get("max_items")
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(overlay.max_items);
+        .unwrap_or(overlay.max_items)
+        .clamp(1, 200);
     let lifetime = params
         .get("lifetime")
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(overlay.message_lifetime_secs);
+        .unwrap_or(overlay.message_lifetime_secs)
+        .clamp(1, 3600);
     let show_avatar = params
         .get("show_avatar")
         .map(|v| v == "true" || v == "1")
@@ -234,7 +275,8 @@ async fn get_overlay_url(
     let font_size = params
         .get("font_size")
         .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(14);
+        .unwrap_or(14)
+        .clamp(8, 48);
 
     let url = format!(
         "http://{host}/overlay?max_items={max_items}&lifetime={lifetime}&show_avatar={show_avatar}&font_size={font_size}"
