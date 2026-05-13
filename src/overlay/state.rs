@@ -201,22 +201,6 @@ pub fn spawn_synthetic_messages(state: SharedState) {
         }
     });
 
-    let panel_tx = state.panel_tx.clone();
-    tokio::spawn(async move {
-        let mut tick = interval(Duration::from_secs(5));
-        let mut count: u64 = 0;
-        loop {
-            tick.tick().await;
-            count += 1;
-            let msg = serde_json::json!({
-                "type": "status",
-                "status": "waiting",
-                "message": format!("connected — waiting for events ({count})")
-            });
-            let _ = panel_tx.send(msg.to_string());
-        }
-    });
-
     let overlay_tx = state.overlay_tx.clone();
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(30));

@@ -67,7 +67,7 @@ function connect() {
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
 
-        if (data.type === "status" && data.status) {
+        if (data.type === "status" && data.status && typeof data.status === "object" && typeof data.status.type === "string") {
             updateConnectionUI(data.status);
         }
 

@@ -121,22 +121,7 @@ async fn overlay_page_returns_200() {
 async fn ws_panel_accepts_client() {
     let (base, _port, _dir) = spawn_server().await;
     let ws_url = base.replace("http://", "ws://") + "/ws/panel";
-    let (mut ws, _) = connect_async(&ws_url).await.unwrap();
-
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(8), ws.next())
-        .await
-        .expect("timeout waiting for panel message")
-        .unwrap()
-        .unwrap();
-
-    let text = match msg {
-        tokio_tungstenite::tungstenite::Message::Text(t) => t,
-        other => panic!("expected text, got {other:?}"),
-    };
-
-    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(parsed["type"], "status");
-    assert!(parsed["message"].as_str().unwrap().contains("waiting"));
+    let (_ws, _) = connect_async(&ws_url).await.unwrap();
 }
 
 #[tokio::test]
