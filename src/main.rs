@@ -26,7 +26,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shared = overlay::state::new();
 
     let http_client = HttpClient::new();
-    let live = LiveConnection::new(http_client, shared.panel_tx.clone());
+    let live = LiveConnection::new(
+        http_client,
+        shared.panel_tx.clone(),
+        shared.overlay_tx.clone(),
+    );
 
     let router = overlay::server::build_router(shared, store, live);
 

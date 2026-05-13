@@ -4,13 +4,16 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
 use super::auth::{self, AuthError};
+use super::commands;
 use super::http::HttpClient;
 use super::socket::{self, SocketHandle, SocketStatus};
+use crate::overlay::state;
 
 pub struct LiveConnection {
     inner: Mutex<ConnectionInner>,
     http_client: HttpClient,
     panel_tx: broadcast::Sender<String>,
+    overlay_tx: broadcast::Sender<String>,
     next_generation: AtomicU64,
 }
 
@@ -27,11 +30,16 @@ struct ActiveConnection {
 }
 
 impl LiveConnection {
-    pub fn new(http_client: HttpClient, panel_tx: broadcast::Sender<String>) -> Arc<Self> {
+    pub fn new(
+        http_client: HttpClient,
+        panel_tx: broadcast::Sender<String>,
+        overlay_tx: broadcast::Sender<String>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(ConnectionInner::Idle),
             http_client,
             panel_tx,
+            overlay_tx,
             next_generation: AtomicU64::new(0),
         })
     }
@@ -159,7 +167,9 @@ impl LiveConnection {
                 cmd = command_rx.recv() => {
                     match cmd {
                         Some(value) => {
-                            tracing::debug!("command: {}", value);
+                            if let Some(event) = commands::parse_command(&value) {
+                                state::send_overlay_event(&self.overlay_tx, &event);
+                            }
                         }
                         None => break,
                     }
@@ -195,8 +205,9 @@ mod tests {
     #[tokio::test]
     async fn test_status_disconnected_when_idle() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
         let status = conn.status().await;
         assert!(matches!(status, SocketStatus::Disconnected { error: None }));
     }
@@ -204,16 +215,18 @@ mod tests {
     #[tokio::test]
     async fn test_stop_returns_false_when_idle() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
         assert!(!conn.stop().await);
     }
 
     #[tokio::test]
     async fn test_start_rejects_zero_room_id() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
         let result = conn.start(0, None).await;
         assert!(result.is_err());
         assert!(matches!(
@@ -225,8 +238,9 @@ mod tests {
     #[tokio::test]
     async fn test_start_rejects_already_running() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
 
         let mut inner = conn.inner.lock().await;
         let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
@@ -249,8 +263,9 @@ mod tests {
     #[tokio::test]
     async fn test_start_rejects_already_starting() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
 
         let mut inner = conn.inner.lock().await;
         *inner = ConnectionInner::Starting(99);
@@ -265,8 +280,9 @@ mod tests {
     #[tokio::test]
     async fn test_status_connecting_while_starting() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
 
         let mut inner = conn.inner.lock().await;
         *inner = ConnectionInner::Starting(1);
@@ -281,8 +297,9 @@ mod tests {
     #[tokio::test]
     async fn test_stop_returns_true_when_starting() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
 
         let mut inner = conn.inner.lock().await;
         *inner = ConnectionInner::Starting(1);
@@ -294,8 +311,9 @@ mod tests {
     #[tokio::test]
     async fn test_stop_during_starting_resets_to_idle() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
 
         let mut inner = conn.inner.lock().await;
         *inner = ConnectionInner::Starting(5);
@@ -310,8 +328,9 @@ mod tests {
     #[tokio::test]
     async fn test_start_resets_to_idle_on_auth_failure() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
 
         let _ = conn.start(0, None).await;
 
@@ -322,8 +341,9 @@ mod tests {
     #[tokio::test]
     async fn test_start_rejected_when_already_starting() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
 
         let mut inner = conn.inner.lock().await;
         *inner = ConnectionInner::Starting(99);
@@ -338,8 +358,9 @@ mod tests {
     #[tokio::test]
     async fn test_auth_failure_returns_cancelled_if_generation_mismatch() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
 
         let _old_gen = {
             let mut inner = conn.inner.lock().await;
@@ -397,8 +418,9 @@ mod tests {
     #[tokio::test]
     async fn test_relay_loop_resets_state_on_exit() {
         let http_client = HttpClient::new();
-        let (tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, tx);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
 
         let (status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
