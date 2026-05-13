@@ -19,8 +19,15 @@ async fn handle_panel(mut socket: WebSocket, state: SharedState) {
         tokio::select! {
             result = rx.recv() => {
                 match result {
-                    Ok(msg) => {
-                        if socket.send(Message::Text(msg.into())).await.is_err() {
+                    Ok(event) => {
+                        let json = match serde_json::to_string(&event) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::error!("failed to serialize panel event: {e}");
+                                continue;
+                            }
+                        };
+                        if socket.send(Message::Text(json.into())).await.is_err() {
                             break;
                         }
                     }
@@ -44,8 +51,15 @@ async fn handle_overlay(mut socket: WebSocket, state: SharedState) {
         tokio::select! {
             result = rx.recv() => {
                 match result {
-                    Ok(msg) => {
-                        if socket.send(Message::Text(msg.into())).await.is_err() {
+                    Ok(event) => {
+                        let json = match serde_json::to_string(&event) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::error!("failed to serialize overlay event: {e}");
+                                continue;
+                            }
+                        };
+                        if socket.send(Message::Text(json.into())).await.is_err() {
                             break;
                         }
                     }

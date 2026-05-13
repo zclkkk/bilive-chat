@@ -9,13 +9,13 @@ use super::http::HttpClient;
 use super::socket::{self, SocketHandle, SocketStatus};
 use crate::chat::filter::ChatFilter;
 use crate::config::ConfigStore;
-use crate::overlay::state;
+use crate::overlay::event::{OverlayEvent, PanelEvent};
 
 pub struct LiveConnection {
     inner: Mutex<ConnectionInner>,
     http_client: HttpClient,
-    panel_tx: broadcast::Sender<String>,
-    overlay_tx: broadcast::Sender<String>,
+    panel_tx: broadcast::Sender<PanelEvent>,
+    overlay_tx: broadcast::Sender<OverlayEvent>,
     store: Arc<ConfigStore>,
     next_generation: AtomicU64,
 }
@@ -35,8 +35,8 @@ struct ActiveConnection {
 impl LiveConnection {
     pub fn new(
         http_client: HttpClient,
-        panel_tx: broadcast::Sender<String>,
-        overlay_tx: broadcast::Sender<String>,
+        panel_tx: broadcast::Sender<PanelEvent>,
+        overlay_tx: broadcast::Sender<OverlayEvent>,
         store: Arc<ConfigStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -165,11 +165,7 @@ impl LiveConnection {
                         break;
                     }
                     let status = status_rx.borrow().clone();
-                    let msg = serde_json::json!({
-                        "type": "status",
-                        "status": status,
-                    });
-                    let _ = self.panel_tx.send(msg.to_string());
+                    let _ = self.panel_tx.send(PanelEvent::Status { status });
                 }
                 cmd = command_rx.recv() => {
                     match cmd {
@@ -180,7 +176,7 @@ impl LiveConnection {
                                     ChatFilter::new(&config.filter)
                                 };
                                 if !filter.should_block(&event) {
-                                    state::send_overlay_event(&self.overlay_tx, &event);
+                                    let _ = self.overlay_tx.send(OverlayEvent::from(&event));
                                 }
                             }
                         }
@@ -215,6 +211,7 @@ pub enum StartError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overlay::event::OverlayEvent;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
@@ -523,10 +520,9 @@ mod tests {
                 .expect("timeout waiting for overlay event")
                 .expect("overlay channel closed");
 
-        let parsed: serde_json::Value = serde_json::from_str(&received).unwrap();
-        assert_eq!(parsed["type"], "normal");
-        assert_eq!(parsed["sender"], "RelayUser");
-        assert_eq!(parsed["text"], "relay test");
+        assert!(
+            matches!(received, OverlayEvent::Normal { ref sender, ref text, .. } if sender == "RelayUser" && text == "relay test")
+        );
 
         conn.stop().await;
     }
