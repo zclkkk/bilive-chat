@@ -30,6 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http_client,
         shared.panel_tx.clone(),
         shared.overlay_tx.clone(),
+        store.clone(),
     );
 
     let router = overlay::server::build_router(shared, store, live);

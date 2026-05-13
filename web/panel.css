@@ -234,3 +234,44 @@ input[type="number"]:focus {
 #messages div:last-child {
     border-bottom: none;
 }
+
+.tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    min-height: 1.6rem;
+    margin-bottom: 0.4rem;
+}
+
+.tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.15rem 0.5rem;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-light);
+    border-radius: 999px;
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+
+.tag-remove {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    line-height: 1;
+}
+
+.tag-remove:hover {
+    color: var(--danger);
+}
+
+.tag-add-form {
+    display: flex;
+    gap: 0.35rem;
+}
+
+.tag-add-form input {
+    flex: 1;
+    min-width: 0;
+}

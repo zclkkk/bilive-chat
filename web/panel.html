@@ -62,6 +62,27 @@
         </section>
 
         <section class="card">
+            <h2>Filters</h2>
+            <div class="field">
+                <label>Blocked Users</label>
+                <div id="blocked-users" class="tag-list"></div>
+                <form id="add-user-form" class="tag-add-form">
+                    <input type="text" id="add-user-input" placeholder="username">
+                    <button type="submit" class="btn btn-small">Add</button>
+                </form>
+            </div>
+            <div class="field">
+                <label>Blocked Keywords</label>
+                <div id="blocked-keywords" class="tag-list"></div>
+                <form id="add-keyword-form" class="tag-add-form">
+                    <input type="text" id="add-keyword-input" placeholder="keyword">
+                    <button type="submit" class="btn btn-small">Add</button>
+                </form>
+            </div>
+            <span id="filter-status" class="hint"></span>
+        </section>
+
+        <section class="card">
             <h2>Event Log</h2>
             <div id="messages"></div>
         </section>

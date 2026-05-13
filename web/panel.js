@@ -216,3 +216,76 @@ document.getElementById("delete-cookie").addEventListener("click", async () => {
         flashHint(loginStatus, "error");
     }
 });
+
+const filterStatus = document.getElementById("filter-status");
+let currentFilter = { blocked_users: [], blocked_keywords: [] };
+
+function renderTags(containerId, items, onRemove) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = "";
+    items.forEach((item, i) => {
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = item;
+        const remove = document.createElement("span");
+        remove.className = "tag-remove";
+        remove.textContent = "×";
+        remove.addEventListener("click", () => onRemove(i));
+        tag.appendChild(remove);
+        container.appendChild(tag);
+    });
+}
+
+async function saveFilter() {
+    const resp = await fetch("/api/filter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(currentFilter),
+    });
+    flashHint(filterStatus, resp.ok ? "saved" : "error");
+}
+
+async function loadFilter() {
+    const resp = await fetch("/api/filter");
+    currentFilter = await resp.json();
+    renderFilterTags();
+}
+
+function renderFilterTags() {
+    renderTags("blocked-users", currentFilter.blocked_users, (i) => {
+        currentFilter.blocked_users.splice(i, 1);
+        renderFilterTags();
+        saveFilter();
+    });
+    renderTags("blocked-keywords", currentFilter.blocked_keywords, (i) => {
+        currentFilter.blocked_keywords.splice(i, 1);
+        renderFilterTags();
+        saveFilter();
+    });
+}
+
+document.getElementById("add-user-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = document.getElementById("add-user-input");
+    const value = input.value.trim();
+    if (value && !currentFilter.blocked_users.includes(value)) {
+        currentFilter.blocked_users.push(value);
+        renderFilterTags();
+        saveFilter();
+    }
+    input.value = "";
+});
+
+document.getElementById("add-keyword-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = document.getElementById("add-keyword-input");
+    const value = input.value.trim();
+    if (value && !currentFilter.blocked_keywords.includes(value)) {
+        currentFilter.blocked_keywords.push(value);
+        renderFilterTags();
+        saveFilter();
+    }
+    input.value = "";
+});
+
+loadFilter();

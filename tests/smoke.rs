@@ -30,6 +30,7 @@ async fn spawn_server() -> (String, u16, PathBuf) {
         http_client,
         shared.panel_tx.clone(),
         shared.overlay_tx.clone(),
+        store.clone(),
     );
     let router = server::build_router(shared, store, live);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -411,4 +412,62 @@ async fn api_bilibili_stop_returns_conflict_when_idle() {
     let (_base, port, _dir) = spawn_server().await;
     let (status, _resp) = http_request(port, "POST", "/api/bilibili/stop", "").await;
     assert_eq!(status, 409);
+}
+
+// Filter API tests
+
+#[tokio::test]
+async fn api_filter_get_returns_defaults() {
+    let (_base, port, _dir) = spawn_server().await;
+    let (status, resp) = http_request(port, "GET", "/api/filter", "").await;
+    assert_eq!(status, 200);
+    let body = response_body(&resp);
+    let data: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert!(data["blocked_users"].as_array().unwrap().is_empty());
+    assert!(data["blocked_keywords"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn api_filter_post_and_get_roundtrip() {
+    let (_base, port, _dir) = spawn_server().await;
+    let body = serde_json::json!({
+        "blocked_users": ["Spammer", "Troll"],
+        "blocked_keywords": ["bad", "spam"]
+    })
+    .to_string();
+    let (status, _) = http_request(port, "POST", "/api/filter", &body).await;
+    assert_eq!(status, 200);
+
+    let (status, resp) = http_request(port, "GET", "/api/filter", "").await;
+    assert_eq!(status, 200);
+    let data: serde_json::Value = serde_json::from_str(response_body(&resp)).unwrap();
+    assert_eq!(
+        data["blocked_users"],
+        serde_json::json!(["Spammer", "Troll"])
+    );
+    assert_eq!(data["blocked_keywords"], serde_json::json!(["bad", "spam"]));
+}
+
+#[tokio::test]
+async fn api_filter_persists_to_config() {
+    let (_base, port, data_dir) = spawn_server().await;
+    let body = serde_json::json!({
+        "blocked_users": ["Evil"],
+        "blocked_keywords": ["forbidden"]
+    })
+    .to_string();
+    let (status, _) = http_request(port, "POST", "/api/filter", &body).await;
+    assert_eq!(status, 200);
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        saved["filter"]["blocked_users"],
+        serde_json::json!(["Evil"])
+    );
+    assert_eq!(
+        saved["filter"]["blocked_keywords"],
+        serde_json::json!(["forbidden"])
+    );
 }

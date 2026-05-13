@@ -3,7 +3,9 @@ pub mod types;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use types::{FilterOptions, OverlayOptions};
+use types::OverlayOptions;
+
+pub use types::FilterOptions;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {

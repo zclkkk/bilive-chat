@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::state::SharedState;
 use crate::bilibili::web_live::{LiveConnection, StartError};
-use crate::config::{Config, ConfigStore, LoginState};
+use crate::config::{Config, ConfigStore, FilterOptions, LoginState};
 
 const PANEL_HTML: &str = include_str!("../../web/panel.html");
 const OVERLAY_HTML: &str = include_str!("../../web/overlay.html");
@@ -87,6 +87,8 @@ pub fn build_router(
         .route("/ws/overlay", get(super::ws::overlay))
         .route("/api/config", get(get_config))
         .route("/api/config", post(post_config))
+        .route("/api/filter", get(get_filter))
+        .route("/api/filter", post(post_filter))
         .route("/api/bilibili/login-state", post(post_login_state))
         .route("/api/bilibili/login-state", delete(delete_login_state))
         .route("/api/overlay-url", get(get_overlay_url))
@@ -115,6 +117,27 @@ async fn post_config(
             .into_response();
     }
     if let Err(e) = store.save_config(&new_config) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+async fn get_filter(Extension(store): Extension<Arc<ConfigStore>>) -> impl IntoResponse {
+    let filter = store.config.lock().unwrap().filter.clone();
+    Json(filter)
+}
+
+async fn post_filter(
+    Extension(store): Extension<Arc<ConfigStore>>,
+    Json(new_filter): Json<FilterOptions>,
+) -> impl IntoResponse {
+    let mut config = store.config.lock().unwrap().clone();
+    config.filter = new_filter;
+    if let Err(e) = store.save_config(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
