@@ -54,6 +54,7 @@ impl LiveConnection {
         room_id: u64,
         cookie: Option<String>,
     ) -> Result<(), StartError> {
+        tracing::info!("start requested for room {room_id}");
         let generation = {
             let mut guard = self.inner.lock().await;
             match &*guard {
@@ -129,6 +130,7 @@ impl LiveConnection {
         let mut guard = self.inner.lock().await;
         match std::mem::replace(&mut *guard, ConnectionInner::Idle) {
             ConnectionInner::Active(active) => {
+                tracing::info!("stopping connection");
                 active.handle.stop();
                 active.relay_task.abort();
                 true
@@ -191,6 +193,7 @@ impl LiveConnection {
         let mut guard = self.inner.lock().await;
         if let ConnectionInner::Active(active) = &*guard {
             if active.generation == generation {
+                tracing::info!("relay loop exited, resetting to idle");
                 *guard = ConnectionInner::Idle;
             }
         }

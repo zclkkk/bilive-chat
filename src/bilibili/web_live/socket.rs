@@ -78,8 +78,12 @@ async fn run_connection(
     let ws_result = tokio_tungstenite::connect_async_tls_with_config(&url, None, false, None).await;
 
     let ws_stream = match ws_result {
-        Ok((stream, _)) => stream,
+        Ok((stream, _)) => {
+            tracing::info!("WebSocket connected to {url}");
+            stream
+        }
         Err(e) => {
+            tracing::warn!("WebSocket connect failed: {e}");
             let _ = status_tx.send(SocketStatus::Disconnected {
                 error: Some(format!("connect error: {e}")),
             });
@@ -136,6 +140,7 @@ async fn run_connection(
                         handle_data(&data, &status_tx, &command_tx).await;
                     }
                     Some(Ok(tungstenite::Message::Close(_))) => {
+                        tracing::info!("connection closed by server");
                         let _ = status_tx.send(SocketStatus::Disconnected {
                             error: Some("connection closed by server".into()),
                         });
@@ -143,6 +148,7 @@ async fn run_connection(
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
+                        tracing::warn!("read error: {e}");
                         let _ = status_tx.send(SocketStatus::Disconnected {
                             error: Some(format!("read error: {e}")),
                         });
@@ -166,6 +172,7 @@ async fn run_connection(
                 }
             }
             _ = cancel.cancelled() => {
+                tracing::info!("connection cancelled");
                 let _ = sink.close().await;
                 let _ = status_tx.send(SocketStatus::Disconnected { error: None });
                 return;
@@ -183,6 +190,7 @@ async fn handle_data(
         let op = packet.op;
         match op {
             _ if op == OP_CONNECT_SUCCESS => {
+                tracing::info!("auth success");
                 let _ = status_tx.send(SocketStatus::Connected {});
             }
             _ if op == OP_HEARTBEAT_REPLY => {}
