@@ -451,4 +451,102 @@ mod tests {
         let status = conn.status().await;
         assert!(matches!(status, SocketStatus::Disconnected { error: None }));
     }
+
+    #[tokio::test]
+    async fn test_relay_loop_broadcasts_parsed_command_to_overlay() {
+        let http_client = HttpClient::new();
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, mut overlay_rx) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
+
+        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
+
+        let generation = 100;
+        let conn_clone = Arc::clone(&conn);
+        let relay_task = tokio::spawn(async move {
+            conn_clone
+                .relay_loop(status_rx, command_rx, generation)
+                .await;
+        });
+
+        let mut inner = conn.inner.lock().await;
+        *inner = ConnectionInner::Active(ActiveConnection {
+            handle: SocketHandle {
+                status_rx: tokio::sync::watch::channel(SocketStatus::Connected {}).1,
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+            relay_task,
+            generation,
+        });
+        drop(inner);
+
+        let danmu = serde_json::json!({
+            "cmd": "DANMU_MSG",
+            "info": [
+                [0],
+                "relay test",
+                [55, "RelayUser", 0, 0, 0, 0, 1, ""]
+            ]
+        });
+        command_tx.send(danmu).await.unwrap();
+        drop(command_tx);
+
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(200), overlay_rx.recv())
+                .await
+                .expect("timeout waiting for overlay event")
+                .expect("overlay channel closed");
+
+        let parsed: serde_json::Value = serde_json::from_str(&received).unwrap();
+        assert_eq!(parsed["type"], "normal");
+        assert_eq!(parsed["sender"], "RelayUser");
+        assert_eq!(parsed["text"], "relay test");
+
+        conn.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_relay_loop_skips_unknown_command() {
+        let http_client = HttpClient::new();
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, mut overlay_rx) = broadcast::channel(16);
+        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx);
+
+        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
+
+        let generation = 101;
+        let conn_clone = Arc::clone(&conn);
+        let relay_task = tokio::spawn(async move {
+            conn_clone
+                .relay_loop(status_rx, command_rx, generation)
+                .await;
+        });
+
+        let mut inner = conn.inner.lock().await;
+        *inner = ConnectionInner::Active(ActiveConnection {
+            handle: SocketHandle {
+                status_rx: tokio::sync::watch::channel(SocketStatus::Connected {}).1,
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+            relay_task,
+            generation,
+        });
+        drop(inner);
+
+        let unknown = serde_json::json!({"cmd": "ROOM_CHANGE", "data": {"title": "new"}});
+        command_tx.send(unknown).await.unwrap();
+        drop(command_tx);
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), overlay_rx.recv()).await;
+
+        assert!(
+            result.is_err(),
+            "unknown command should not produce overlay event"
+        );
+
+        conn.stop().await;
+    }
 }
