@@ -310,7 +310,7 @@ pub async fn prepare(
 
     let long_room_id = resolve_room_id(api, room_id, &cookie_header).await?;
 
-    let (mixin_key, uid, is_login) = fetch_nav_data(api, &cookie_header).await?;
+    let (mixin_key, uid, is_login) = fetch_nav_data(api, &cookie_header, has_cookie).await?;
 
     if has_cookie && (!is_login || uid.is_none()) {
         return Err(AuthError::CookieNotLoggedIn);
@@ -373,15 +373,41 @@ async fn resolve_room_id(
 async fn fetch_nav_data(
     api: &dyn BiliApi,
     cookie_header: &str,
+    has_cookie: bool,
 ) -> Result<(String, Option<u64>, bool), AuthError> {
-    let nav = api.fetch_nav(cookie_header).await?.check_code()?;
+    let nav = api.fetch_nav(cookie_header).await?;
 
-    let nav_data = nav
-        .data
-        .ok_or_else(|| AuthError::MissingData("nav data missing".into()))?;
+    if has_cookie {
+        if nav.code != 0 {
+            return Err(AuthError::CookieNotLoggedIn);
+        }
+        let nav_data = nav.data.ok_or_else(|| AuthError::CookieNotLoggedIn)?;
+        if !nav_data.is_login {
+            return Err(AuthError::CookieNotLoggedIn);
+        }
+        let uid = nav_data.mid.filter(|uid| *uid > 0);
+        if uid.is_none() {
+            return Err(AuthError::CookieNotLoggedIn);
+        }
+        let mixin_key = extract_mixin_key(&nav_data.wbi_img)?;
+        Ok((mixin_key, uid, true))
+    } else {
+        if nav.code != 0 && nav.data.is_none() {
+            return Err(AuthError::MissingData(
+                "nav returned error without data".into(),
+            ));
+        }
+        let nav_data = nav
+            .data
+            .ok_or_else(|| AuthError::MissingData("nav data missing".into()))?;
+        let mixin_key = extract_mixin_key(&nav_data.wbi_img)?;
+        let uid = nav_data.mid.filter(|uid| *uid > 0);
+        Ok((mixin_key, uid, nav_data.is_login))
+    }
+}
 
-    let img_key = nav_data
-        .wbi_img
+fn extract_mixin_key(wbi_img: &WbiImg) -> Result<String, AuthError> {
+    let img_key = wbi_img
         .img_url
         .rsplit('/')
         .next()
@@ -393,8 +419,7 @@ async fn fetch_nav_data(
         ));
     }
 
-    let sub_key = nav_data
-        .wbi_img
+    let sub_key = wbi_img
         .sub_url
         .rsplit('/')
         .next()
@@ -414,9 +439,7 @@ async fn fetch_nav_data(
         )));
     }
 
-    let uid = nav_data.mid.filter(|uid| *uid > 0);
-
-    Ok((mixin_key, uid, nav_data.is_login))
+    Ok(mixin_key)
 }
 
 #[cfg(test)]
@@ -663,6 +686,14 @@ mod tests {
         }
     }
 
+    fn nav_error_with_data(code: i64, message: &str, data: NavData) -> BiliResponse<NavData> {
+        BiliResponse {
+            code,
+            message: Some(message.into()),
+            data: Some(data),
+        }
+    }
+
     fn fixture_nav_data(logged_in: bool, uid: u64) -> NavData {
         NavData {
             wbi_img: WbiImg {
@@ -811,23 +842,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prepare_api_error_on_nav() {
+    async fn test_prepare_guest_nav_code_minus101_with_data_succeeds() {
         let api = MockBiliApi {
             spi: success_response(SpiData {
                 b_3: "test-buvid3".into(),
             }),
             room_init: success_response(RoomInitData { room_id: 12345 }),
-            nav: api_error_response(-101, "account not logged in"),
+            nav: nav_error_with_data(-101, "账号未登录", fixture_nav_data(false, 0)),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, None, 1700000000).await.unwrap();
+        assert_eq!(result.uid, None);
+        assert_eq!(result.room_id, 12345);
+        assert_eq!(result.key, "test-danmu-token");
+    }
+
+    #[tokio::test]
+    async fn test_prepare_guest_nav_code_minus101_without_data_fails() {
+        let api = MockBiliApi {
+            spi: success_response(SpiData {
+                b_3: "test-buvid3".into(),
+            }),
+            room_init: success_response(RoomInitData { room_id: 12345 }),
+            nav: api_error_response(-101, "账号未登录"),
             danmu_info: success_response(fixture_danmu_data()),
         };
         let result = prepare(&api, 12345, None, 1700000000).await;
-        match result.unwrap_err() {
-            AuthError::Api { code, message } => {
-                assert_eq!(code, -101);
-                assert_eq!(message, "account not logged in");
-            }
-            other => panic!("expected Api error, got {other}"),
-        }
+        assert!(
+            matches!(result.unwrap_err(), AuthError::MissingData(_)),
+            "guest nav -101 without data should be MissingData"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_cookie_nav_code_minus101_returns_not_logged_in() {
+        let api = MockBiliApi {
+            spi: success_response(SpiData {
+                b_3: "test-buvid3".into(),
+            }),
+            room_init: success_response(RoomInitData { room_id: 12345 }),
+            nav: nav_error_with_data(-101, "账号未登录", fixture_nav_data(false, 0)),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, Some("SESSDATA=abc"), 1700000000).await;
+        assert!(
+            matches!(result.unwrap_err(), AuthError::CookieNotLoggedIn),
+            "cookie-present nav -101 should be CookieNotLoggedIn"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_cookie_nav_code_0_but_not_logged_in() {
+        let api = MockBiliApi {
+            spi: success_response(SpiData {
+                b_3: "test-buvid3".into(),
+            }),
+            room_init: success_response(RoomInitData { room_id: 12345 }),
+            nav: success_response(fixture_nav_data(false, 0)),
+            danmu_info: success_response(fixture_danmu_data()),
+        };
+        let result = prepare(&api, 12345, Some("SESSDATA=abc"), 1700000000).await;
+        assert!(
+            matches!(result.unwrap_err(), AuthError::CookieNotLoggedIn),
+            "cookie-present nav code=0 isLogin=false should be CookieNotLoggedIn"
+        );
     }
 
     #[tokio::test]
