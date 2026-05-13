@@ -24,7 +24,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let shared = overlay::state::new();
-    overlay::state::spawn_synthetic_messages(shared.clone());
 
     let http_client = HttpClient::new();
     let live = LiveConnection::new(http_client, shared.panel_tx.clone());

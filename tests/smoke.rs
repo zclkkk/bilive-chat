@@ -1,7 +1,6 @@
 use bilive_chat::bilibili::web_live::{HttpClient, LiveConnection};
 use bilive_chat::config::{Config, ConfigStore, LoginState};
 use bilive_chat::overlay::{server, state};
-use futures_util::StreamExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,7 +23,6 @@ fn temp_dir(name: &str) -> PathBuf {
 async fn spawn_server() -> (String, u16, PathBuf) {
     let data_dir = temp_dir("server");
     let shared = state::new();
-    state::spawn_synthetic_messages(shared.clone());
 
     let store = Arc::new(ConfigStore::new(data_dir.clone()));
     let http_client = HttpClient::new();
@@ -125,62 +123,10 @@ async fn ws_panel_accepts_client() {
 }
 
 #[tokio::test]
-async fn ws_overlay_receives_display_events() {
+async fn ws_overlay_accepts_client() {
     let (base, _port, _dir) = spawn_server().await;
     let ws_url = base.replace("http://", "ws://") + "/ws/overlay";
-    let (mut ws, _) = connect_async(&ws_url).await.unwrap();
-
-    let mut seen_types = std::collections::HashSet::new();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
-
-    while seen_types.len() < 3 && tokio::time::Instant::now() < deadline {
-        let msg = tokio::time::timeout(deadline - tokio::time::Instant::now(), ws.next())
-            .await
-            .expect("timeout waiting for overlay events")
-            .unwrap()
-            .unwrap();
-
-        let text = match msg {
-            tokio_tungstenite::tungstenite::Message::Text(t) => t,
-            other => panic!("expected text, got {other:?}"),
-        };
-
-        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let event_type = parsed["type"].as_str().unwrap().to_string();
-        seen_types.insert(event_type.clone());
-
-        match event_type.as_str() {
-            "normal" => {
-                assert!(parsed["sender"].as_str().is_some());
-                assert!(parsed["text"].as_str().is_some());
-                assert!(parsed["avatar_color"].as_str().is_some());
-            }
-            "gift" => {
-                assert!(parsed["sender"].as_str().is_some());
-                assert!(parsed["gift_name"].as_str().is_some());
-                assert!(parsed["count"].as_u64().is_some());
-            }
-            "super_chat" => {
-                assert!(parsed["sender"].as_str().is_some());
-                assert!(parsed["amount"].as_u64().is_some());
-                assert!(parsed["currency"].as_str().is_some());
-            }
-            "guard" => {
-                assert!(parsed["sender"].as_str().is_some());
-                assert!(parsed["guard_name"].as_str().is_some());
-                assert!(parsed["count"].as_u64().is_some());
-            }
-            "system" => {
-                assert!(parsed["text"].as_str().is_some());
-            }
-            other => panic!("unexpected event type: {other}"),
-        }
-    }
-
-    assert!(
-        seen_types.len() >= 3,
-        "expected at least 3 distinct event types, got: {seen_types:?}"
-    );
+    let (_ws, _) = connect_async(&ws_url).await.unwrap();
 }
 
 // Config API tests
