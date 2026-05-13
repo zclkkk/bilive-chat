@@ -1,6 +1,7 @@
 use bilive_chat::bilibili::web_live::{HttpClient, LiveConnection};
 use bilive_chat::config::ConfigStore;
 use bilive_chat::overlay;
+use bilive_chat::overlay::state::AppState;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -33,7 +34,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store.clone(),
     );
 
-    let router = overlay::server::build_router(shared, store, live);
+    let app_state = AppState {
+        shared,
+        store,
+        live,
+    };
+
+    let router = overlay::server::build_router(app_state);
 
     let addr = format!("{}:{}", config.host, config.port);
     tracing::info!("starting server on {addr}");

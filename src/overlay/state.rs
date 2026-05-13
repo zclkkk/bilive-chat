@@ -1,6 +1,9 @@
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
+use crate::bilibili::web_live::LiveConnection;
 use crate::chat::event::ChatEvent;
+use crate::config::ConfigStore;
 
 const CHANNEL_CAPACITY: usize = 64;
 
@@ -16,6 +19,13 @@ pub fn avatar_color(uid: u64) -> String {
 pub struct SharedState {
     pub panel_tx: broadcast::Sender<String>,
     pub overlay_tx: broadcast::Sender<String>,
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    pub shared: SharedState,
+    pub store: Arc<ConfigStore>,
+    pub live: Arc<LiveConnection>,
 }
 
 pub fn new() -> SharedState {

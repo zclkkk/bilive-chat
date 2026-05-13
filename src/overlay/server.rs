@@ -1,14 +1,13 @@
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
-use axum::{Extension, Json, Router};
+use axum::{Json, Router};
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use super::state::SharedState;
-use crate::bilibili::web_live::{LiveConnection, StartError};
-use crate::config::{Config, ConfigStore, FilterOptions, LoginState};
+use super::state::AppState;
+use crate::bilibili::web_live::StartError;
+use crate::config::{Config, FilterOptions, LoginState};
 
 const PANEL_HTML: &str = include_str!("../../web/panel.html");
 const OVERLAY_HTML: &str = include_str!("../../web/overlay.html");
@@ -17,11 +16,7 @@ const PANEL_JS: &str = include_str!("../../web/panel.js");
 const OVERLAY_CSS: &str = include_str!("../../web/overlay.css");
 const OVERLAY_JS: &str = include_str!("../../web/overlay.js");
 
-pub fn build_router(
-    shared: SharedState,
-    store: Arc<ConfigStore>,
-    live: Arc<LiveConnection>,
-) -> Router {
+pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route(
             "/",
@@ -95,18 +90,16 @@ pub fn build_router(
         .route("/api/bilibili/start", post(post_start))
         .route("/api/bilibili/stop", post(post_stop))
         .route("/api/bilibili/status", get(get_status))
-        .layer(Extension(store))
-        .layer(Extension(live))
-        .with_state(shared)
+        .with_state(state)
 }
 
-async fn get_config(Extension(store): Extension<Arc<ConfigStore>>) -> impl IntoResponse {
-    let config = store.config.lock().unwrap().clone();
+async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
+    let config = state.store.config.lock().unwrap().clone();
     Json(config)
 }
 
 async fn post_config(
-    Extension(store): Extension<Arc<ConfigStore>>,
+    State(state): State<AppState>,
     Json(new_config): Json<Config>,
 ) -> impl IntoResponse {
     if let Err(e) = new_config.validate() {
@@ -116,7 +109,7 @@ async fn post_config(
         )
             .into_response();
     }
-    if let Err(e) = store.save_config(&new_config) {
+    if let Err(e) = state.store.save_config(&new_config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
@@ -126,19 +119,19 @@ async fn post_config(
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
-async fn get_filter(Extension(store): Extension<Arc<ConfigStore>>) -> impl IntoResponse {
-    let filter = store.config.lock().unwrap().filter.clone();
+async fn get_filter(State(state): State<AppState>) -> impl IntoResponse {
+    let filter = state.store.config.lock().unwrap().filter.clone();
     Json(filter)
 }
 
 async fn post_filter(
-    Extension(store): Extension<Arc<ConfigStore>>,
+    State(state): State<AppState>,
     Json(mut new_filter): Json<FilterOptions>,
 ) -> impl IntoResponse {
     new_filter.normalize();
-    let mut config = store.config.lock().unwrap().clone();
+    let mut config = state.store.config.lock().unwrap().clone();
     config.filter = new_filter;
-    if let Err(e) = store.save_config(&config) {
+    if let Err(e) = state.store.save_config(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
@@ -149,7 +142,7 @@ async fn post_filter(
 }
 
 async fn post_login_state(
-    Extension(store): Extension<Arc<ConfigStore>>,
+    State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let cookie = match body.get("cookie").and_then(|v| v.as_str()) {
@@ -163,12 +156,12 @@ async fn post_login_state(
         }
     };
 
-    let state = LoginState {
+    let login_state = LoginState {
         cookie,
         updated: Some(now_secs()),
     };
 
-    if let Err(e) = store.save_login_state(&state) {
+    if let Err(e) = state.store.save_login_state(&login_state) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
@@ -179,8 +172,8 @@ async fn post_login_state(
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
-async fn delete_login_state(Extension(store): Extension<Arc<ConfigStore>>) -> impl IntoResponse {
-    if let Err(e) = store.delete_login_state() {
+async fn delete_login_state(State(state): State<AppState>) -> impl IntoResponse {
+    if let Err(e) = state.store.delete_login_state() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
@@ -191,11 +184,8 @@ async fn delete_login_state(Extension(store): Extension<Arc<ConfigStore>>) -> im
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
-async fn post_start(
-    Extension(store): Extension<Arc<ConfigStore>>,
-    Extension(live): Extension<Arc<LiveConnection>>,
-) -> impl IntoResponse {
-    let config = store.config.lock().unwrap().clone();
+async fn post_start(State(state): State<AppState>) -> impl IntoResponse {
+    let config = state.store.config.lock().unwrap().clone();
     let room_id = config.room_id;
     if room_id == 0 {
         return (
@@ -206,8 +196,8 @@ async fn post_start(
     }
 
     let cookie = {
-        let state = store.login_state.lock().unwrap();
-        let trimmed = state.cookie.trim();
+        let ls = state.store.login_state.lock().unwrap();
+        let trimmed = ls.cookie.trim();
         if trimmed.is_empty() {
             None
         } else {
@@ -215,7 +205,7 @@ async fn post_start(
         }
     };
 
-    match live.start(room_id, cookie).await {
+    match state.live.start(room_id, cookie).await {
         Ok(()) => {
             tracing::info!("web_live started for room {room_id}");
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
@@ -243,8 +233,8 @@ async fn post_start(
     }
 }
 
-async fn post_stop(Extension(live): Extension<Arc<LiveConnection>>) -> impl IntoResponse {
-    if live.stop().await {
+async fn post_stop(State(state): State<AppState>) -> impl IntoResponse {
+    if state.live.stop().await {
         tracing::info!("web_live stopped");
         (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
     } else {
@@ -256,17 +246,17 @@ async fn post_stop(Extension(live): Extension<Arc<LiveConnection>>) -> impl Into
     }
 }
 
-async fn get_status(Extension(live): Extension<Arc<LiveConnection>>) -> impl IntoResponse {
-    let status = live.status().await;
+async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
+    let status = state.live.status().await;
     Json(serde_json::to_value(status).unwrap_or_default())
 }
 
 async fn get_overlay_url(
-    Extension(store): Extension<Arc<ConfigStore>>,
+    State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let config = store.config.lock().unwrap().clone();
+    let config = state.store.config.lock().unwrap().clone();
     let overlay = &config.overlay;
 
     let host = headers

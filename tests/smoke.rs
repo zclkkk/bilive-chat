@@ -1,5 +1,6 @@
 use bilive_chat::bilibili::web_live::{HttpClient, LiveConnection};
 use bilive_chat::config::{Config, ConfigStore, LoginState};
+use bilive_chat::overlay::state::AppState;
 use bilive_chat::overlay::{server, state};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,7 +33,12 @@ async fn spawn_server() -> (String, u16, PathBuf) {
         shared.overlay_tx.clone(),
         store.clone(),
     );
-    let router = server::build_router(shared, store, live);
+    let app_state = AppState {
+        shared,
+        store,
+        live,
+    };
+    let router = server::build_router(app_state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 

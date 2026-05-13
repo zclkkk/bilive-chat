@@ -3,14 +3,14 @@ use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use tokio::sync::broadcast;
 
-use super::state::SharedState;
+use super::state::{AppState, SharedState};
 
-pub async fn panel(ws: WebSocketUpgrade, State(state): State<SharedState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_panel(socket, state))
+pub async fn panel(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_panel(socket, state.shared))
 }
 
-pub async fn overlay(ws: WebSocketUpgrade, State(state): State<SharedState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_overlay(socket, state))
+pub async fn overlay(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_overlay(socket, state.shared))
 }
 
 async fn handle_panel(mut socket: WebSocket, state: SharedState) {
