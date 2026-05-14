@@ -1,9 +1,7 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-use tokio::sync::{broadcast, Mutex};
-
-use super::auth::{self, AuthError};
+use super::auth::{self, AuthError, WebLiveAuth};
 use super::commands;
 use super::http::HttpClient;
 use super::socket::{self, SocketHandle, SocketStatus};
@@ -11,25 +9,66 @@ use crate::chat::filter::ChatFilter;
 use crate::config::FilterOptions;
 use crate::overlay::event::{OverlayEvent, PanelEvent};
 
+const CHANNEL_SIZE: usize = 32;
+
 pub struct LiveConnection {
-    inner: Mutex<ConnectionInner>,
+    cmd_tx: mpsc::Sender<LiveCommand>,
+}
+
+enum LiveCommand {
+    Start {
+        room_id: u64,
+        cookie: Option<String>,
+        reply: oneshot::Sender<Result<(), StartError>>,
+    },
+    Stop {
+        reply: oneshot::Sender<bool>,
+    },
+    Status {
+        reply: oneshot::Sender<SocketStatus>,
+    },
+}
+
+enum RuntimeEvent {
+    AuthFinished {
+        session: u64,
+        result: Result<WebLiveAuth, AuthError>,
+    },
+    RelayExited {
+        session: u64,
+    },
+    SocketStatusChanged {
+        session: u64,
+        status: SocketStatus,
+    },
+}
+
+enum RuntimeState {
+    Idle,
+    Starting {
+        session: u64,
+        auth_task: tokio::task::JoinHandle<()>,
+        start_reply: oneshot::Sender<Result<(), StartError>>,
+    },
+    Active {
+        session: u64,
+        socket_handle: SocketHandle,
+        relay_task: tokio::task::JoinHandle<()>,
+        status_task: tokio::task::JoinHandle<()>,
+        latest_status: SocketStatus,
+    },
+}
+
+struct LiveRuntime {
+    state: RuntimeState,
     http_client: HttpClient,
     panel_tx: broadcast::Sender<PanelEvent>,
     overlay_tx: broadcast::Sender<OverlayEvent>,
-    filter_rx: tokio::sync::watch::Receiver<FilterOptions>,
-    next_generation: AtomicU64,
-}
-
-enum ConnectionInner {
-    Idle,
-    Starting(u64),
-    Active(ActiveConnection),
-}
-
-struct ActiveConnection {
-    handle: SocketHandle,
-    relay_task: tokio::task::JoinHandle<()>,
-    generation: u64,
+    filter_rx: watch::Receiver<FilterOptions>,
+    cmd_rx: mpsc::Receiver<LiveCommand>,
+    event_rx: mpsc::Receiver<RuntimeEvent>,
+    event_tx: mpsc::Sender<RuntimeEvent>,
+    next_session: u64,
 }
 
 impl LiveConnection {
@@ -37,168 +76,345 @@ impl LiveConnection {
         http_client: HttpClient,
         panel_tx: broadcast::Sender<PanelEvent>,
         overlay_tx: broadcast::Sender<OverlayEvent>,
-        filter_rx: tokio::sync::watch::Receiver<FilterOptions>,
+        filter_rx: watch::Receiver<FilterOptions>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            inner: Mutex::new(ConnectionInner::Idle),
+        let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_SIZE);
+        let (event_tx, event_rx) = mpsc::channel(CHANNEL_SIZE);
+
+        let runtime = LiveRuntime {
+            state: RuntimeState::Idle,
             http_client,
             panel_tx,
             overlay_tx,
             filter_rx,
-            next_generation: AtomicU64::new(0),
-        })
+            cmd_rx,
+            event_rx,
+            event_tx,
+            next_session: 0,
+        };
+
+        tokio::spawn(runtime.run());
+
+        Arc::new(Self { cmd_tx })
     }
 
-    pub async fn start(
-        self: &Arc<Self>,
-        room_id: u64,
-        cookie: Option<String>,
-    ) -> Result<(), StartError> {
-        tracing::info!("start requested for room {room_id}");
-        let generation = {
-            let mut guard = self.inner.lock().await;
-            match &*guard {
-                ConnectionInner::Active(_) | ConnectionInner::Starting(_) => {
-                    return Err(StartError::AlreadyRunning)
-                }
-                ConnectionInner::Idle => {}
-            }
-            let gen = self.next_generation.fetch_add(1, Ordering::Relaxed);
-            *guard = ConnectionInner::Starting(gen);
-            gen
-        };
-
-        let api = auth::LiveBiliApi::new(self.http_client.clone());
-        let wts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let cookie_ref = cookie.as_deref();
-        let web_auth = match auth::prepare(&api, room_id, cookie_ref, wts).await {
-            Ok(a) => a,
-            Err(e) => {
-                let mut guard = self.inner.lock().await;
-                if let ConnectionInner::Starting(gen) = &*guard {
-                    if *gen == generation {
-                        *guard = ConnectionInner::Idle;
-                        return Err(match e {
-                            AuthError::CookieNotLoggedIn => StartError::CookieNotLoggedIn,
-                            other => StartError::Auth(other),
-                        });
-                    }
-                }
-                return Err(StartError::Cancelled);
-            }
-        };
-
+    pub async fn start(&self, room_id: u64, cookie: Option<String>) -> Result<(), StartError> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(LiveCommand::Start {
+                room_id,
+                cookie,
+                reply,
+            })
+            .await
+            .is_err()
         {
-            let guard = self.inner.lock().await;
-            match &*guard {
-                ConnectionInner::Starting(gen) if *gen == generation => {}
-                _ => return Err(StartError::Cancelled),
-            }
+            panic!("live runtime task exited before start command");
         }
-
-        let (handle, command_rx) = socket::connect(web_auth);
-
-        let conn = Arc::clone(self);
-        let status_rx = handle.status_rx.clone();
-        let filter_rx = self.filter_rx.clone();
-        let relay_task = tokio::spawn(async move {
-            conn.relay_loop(status_rx, command_rx, filter_rx, generation)
-                .await;
-        });
-
-        let mut guard = self.inner.lock().await;
-        match &*guard {
-            ConnectionInner::Starting(gen) if *gen == generation => {
-                *guard = ConnectionInner::Active(ActiveConnection {
-                    handle,
-                    relay_task,
-                    generation,
-                });
-            }
-            _ => {
-                handle.stop();
-                relay_task.abort();
-                return Err(StartError::Cancelled);
-            }
-        }
-
-        Ok(())
+        rx.await
+            .expect("live runtime dropped start reply before responding")
     }
 
     pub async fn stop(&self) -> bool {
-        let mut guard = self.inner.lock().await;
-        match std::mem::replace(&mut *guard, ConnectionInner::Idle) {
-            ConnectionInner::Active(active) => {
-                tracing::info!("stopping connection");
-                active.handle.stop();
-                active.relay_task.abort();
-                true
-            }
-            ConnectionInner::Starting(_) => true,
-            ConnectionInner::Idle => false,
+        let (reply, rx) = oneshot::channel();
+        if self.cmd_tx.send(LiveCommand::Stop { reply }).await.is_err() {
+            panic!("live runtime task exited before stop command");
         }
+        rx.await
+            .expect("live runtime dropped stop reply before responding")
     }
 
     pub async fn status(&self) -> SocketStatus {
-        let guard = self.inner.lock().await;
-        match &*guard {
-            ConnectionInner::Idle => SocketStatus::Disconnected { error: None },
-            ConnectionInner::Starting(_) => SocketStatus::Connecting {},
-            ConnectionInner::Active(active) => active.handle.status_rx.borrow().clone(),
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(LiveCommand::Status { reply })
+            .await
+            .is_err()
+        {
+            panic!("live runtime task exited before status command");
         }
+        rx.await
+            .expect("live runtime dropped status reply before responding")
     }
 }
 
-impl LiveConnection {
-    async fn relay_loop(
-        self: Arc<Self>,
-        mut status_rx: tokio::sync::watch::Receiver<SocketStatus>,
-        mut command_rx: tokio::sync::mpsc::Receiver<serde_json::Value>,
-        mut filter_rx: tokio::sync::watch::Receiver<FilterOptions>,
-        generation: u64,
-    ) {
-        let mut filter = ChatFilter::new(&filter_rx.borrow());
-
+impl LiveRuntime {
+    async fn run(mut self) {
         loop {
             tokio::select! {
-                biased;
-                result = status_rx.changed() => {
-                    if result.is_err() {
-                        break;
-                    }
-                    let status = status_rx.borrow().clone();
-                    let _ = self.panel_tx.send(PanelEvent::Status { status });
-                }
-                cmd = command_rx.recv() => {
+                cmd = self.cmd_rx.recv() => {
                     match cmd {
-                        Some(value) => {
-                            if let Some(event) = commands::parse_command(&value) {
-                                if !filter.should_block(&event) {
-                                    let _ = self.overlay_tx.send(OverlayEvent::from(&event));
-                                }
-                            }
-                        }
+                        Some(cmd) => self.handle_command(cmd),
                         None => break,
                     }
                 }
-                result = filter_rx.changed() => {
-                    if result.is_err() {
-                        break;
+                event = self.event_rx.recv() => {
+                    match event {
+                        Some(event) => self.handle_event(event).await,
+                        None => break,
                     }
-                    filter = ChatFilter::new(&filter_rx.borrow());
                 }
             }
         }
+        self.shutdown();
+    }
 
-        let mut guard = self.inner.lock().await;
-        if let ConnectionInner::Active(active) = &*guard {
-            if active.generation == generation {
-                tracing::info!("relay loop exited, resetting to idle");
-                *guard = ConnectionInner::Idle;
+    fn handle_command(&mut self, cmd: LiveCommand) {
+        match cmd {
+            LiveCommand::Start {
+                room_id,
+                cookie,
+                reply,
+            } => {
+                tracing::info!("start requested for room {room_id}");
+                match &self.state {
+                    RuntimeState::Idle => {
+                        self.next_session += 1;
+                        let session = self.next_session;
+
+                        let api = auth::LiveBiliApi::new(self.http_client.clone());
+                        let wts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let event_tx = self.event_tx.clone();
+                        let auth_task = tokio::spawn(async move {
+                            let result = auth::prepare(&api, room_id, cookie.as_deref(), wts).await;
+                            let _ = event_tx
+                                .send(RuntimeEvent::AuthFinished { session, result })
+                                .await;
+                        });
+
+                        let _ = self.panel_tx.send(PanelEvent::Status {
+                            status: SocketStatus::Connecting {},
+                        });
+
+                        self.state = RuntimeState::Starting {
+                            session,
+                            auth_task,
+                            start_reply: reply,
+                        };
+                    }
+                    _ => {
+                        let _ = reply.send(Err(StartError::AlreadyRunning));
+                    }
+                }
             }
+            LiveCommand::Stop { reply } => {
+                let old = std::mem::replace(&mut self.state, RuntimeState::Idle);
+                match old {
+                    RuntimeState::Idle => {
+                        self.state = RuntimeState::Idle;
+                        let _ = reply.send(false);
+                    }
+                    RuntimeState::Starting {
+                        auth_task,
+                        start_reply,
+                        ..
+                    } => {
+                        Self::cancel_starting(auth_task, start_reply);
+                        let _ = self.panel_tx.send(PanelEvent::Status {
+                            status: SocketStatus::Disconnected { error: None },
+                        });
+                        let _ = reply.send(true);
+                    }
+                    RuntimeState::Active {
+                        socket_handle,
+                        relay_task,
+                        status_task,
+                        ..
+                    } => {
+                        tracing::info!("stopping connection");
+                        Self::stop_active(socket_handle, relay_task, status_task);
+                        let _ = self.panel_tx.send(PanelEvent::Status {
+                            status: SocketStatus::Disconnected { error: None },
+                        });
+                        let _ = reply.send(true);
+                    }
+                }
+            }
+            LiveCommand::Status { reply } => {
+                let status = match &self.state {
+                    RuntimeState::Idle => SocketStatus::Disconnected { error: None },
+                    RuntimeState::Starting { .. } => SocketStatus::Connecting {},
+                    RuntimeState::Active { latest_status, .. } => latest_status.clone(),
+                };
+                let _ = reply.send(status);
+            }
+        }
+    }
+
+    async fn handle_event(&mut self, event: RuntimeEvent) {
+        match event {
+            RuntimeEvent::AuthFinished { session, result } => {
+                let old = std::mem::replace(&mut self.state, RuntimeState::Idle);
+                match old {
+                    RuntimeState::Starting {
+                        session: s,
+                        auth_task: _,
+                        start_reply,
+                    } if s == session => match result {
+                        Ok(web_auth) => {
+                            let (handle, command_rx) = socket::connect(web_auth);
+                            let relay_task = tokio::spawn(relay_loop(
+                                command_rx,
+                                self.overlay_tx.clone(),
+                                self.filter_rx.clone(),
+                                self.event_tx.clone(),
+                                session,
+                            ));
+                            let status_rx = handle.status_rx.clone();
+                            let status_task = tokio::spawn(status_watcher(
+                                status_rx,
+                                self.event_tx.clone(),
+                                session,
+                            ));
+                            self.state = RuntimeState::Active {
+                                session,
+                                socket_handle: handle,
+                                relay_task,
+                                status_task,
+                                latest_status: SocketStatus::Connecting {},
+                            };
+                            let _ = start_reply.send(Ok(()));
+                        }
+                        Err(e) => {
+                            let err = match e {
+                                AuthError::CookieNotLoggedIn => StartError::CookieNotLoggedIn,
+                                other => StartError::Auth(other),
+                            };
+                            let _ = start_reply.send(Err(err));
+                        }
+                    },
+                    other => {
+                        self.state = other;
+                    }
+                }
+            }
+            RuntimeEvent::RelayExited { session } => {
+                let old = std::mem::replace(&mut self.state, RuntimeState::Idle);
+                match old {
+                    RuntimeState::Active {
+                        session: s,
+                        socket_handle,
+                        relay_task,
+                        status_task,
+                        ..
+                    } if s == session => {
+                        tracing::info!("relay loop exited, resetting to idle");
+                        Self::stop_active(socket_handle, relay_task, status_task);
+                    }
+                    other => {
+                        self.state = other;
+                    }
+                }
+            }
+            RuntimeEvent::SocketStatusChanged { session, status } => match &mut self.state {
+                RuntimeState::Active {
+                    session: s,
+                    latest_status,
+                    ..
+                } if *s == session => {
+                    *latest_status = status.clone();
+                    let _ = self.panel_tx.send(PanelEvent::Status { status });
+                }
+                _ => {}
+            },
+        }
+    }
+
+    fn shutdown(&mut self) {
+        let old = std::mem::replace(&mut self.state, RuntimeState::Idle);
+        match old {
+            RuntimeState::Idle => {}
+            RuntimeState::Starting {
+                auth_task,
+                start_reply,
+                ..
+            } => {
+                Self::cancel_starting(auth_task, start_reply);
+            }
+            RuntimeState::Active {
+                socket_handle,
+                relay_task,
+                status_task,
+                ..
+            } => {
+                Self::stop_active(socket_handle, relay_task, status_task);
+            }
+        }
+    }
+
+    fn cancel_starting(
+        auth_task: tokio::task::JoinHandle<()>,
+        start_reply: oneshot::Sender<Result<(), StartError>>,
+    ) {
+        auth_task.abort();
+        let _ = start_reply.send(Err(StartError::Cancelled));
+    }
+
+    fn stop_active(
+        socket_handle: SocketHandle,
+        relay_task: tokio::task::JoinHandle<()>,
+        status_task: tokio::task::JoinHandle<()>,
+    ) {
+        socket_handle.stop();
+        relay_task.abort();
+        status_task.abort();
+    }
+}
+
+async fn relay_loop(
+    mut command_rx: mpsc::Receiver<serde_json::Value>,
+    overlay_tx: broadcast::Sender<OverlayEvent>,
+    mut filter_rx: watch::Receiver<FilterOptions>,
+    event_tx: mpsc::Sender<RuntimeEvent>,
+    session: u64,
+) {
+    let mut filter = ChatFilter::new(&filter_rx.borrow());
+
+    loop {
+        tokio::select! {
+            biased;
+            cmd = command_rx.recv() => {
+                match cmd {
+                    Some(value) => {
+                        if let Some(event) = commands::parse_command(&value) {
+                            if !filter.should_block(&event) {
+                                let _ = overlay_tx.send(OverlayEvent::from(&event));
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
+            result = filter_rx.changed() => {
+                if result.is_err() {
+                    break;
+                }
+                filter = ChatFilter::new(&filter_rx.borrow());
+            }
+        }
+    }
+
+    let _ = event_tx.send(RuntimeEvent::RelayExited { session }).await;
+}
+
+async fn status_watcher(
+    mut status_rx: watch::Receiver<SocketStatus>,
+    event_tx: mpsc::Sender<RuntimeEvent>,
+    session: u64,
+) {
+    while status_rx.changed().await.is_ok() {
+        let status = status_rx.borrow().clone();
+        if event_tx
+            .send(RuntimeEvent::SocketStatusChanged { session, status })
+            .await
+            .is_err()
+        {
+            break;
         }
     }
 }
@@ -220,20 +436,17 @@ mod tests {
     use super::*;
     use crate::overlay::event::OverlayEvent;
 
-    fn test_filter_rx() -> tokio::sync::watch::Receiver<FilterOptions> {
-        let (_, rx) = tokio::sync::watch::channel(FilterOptions::default());
+    fn test_filter_rx() -> watch::Receiver<FilterOptions> {
+        let (_, rx) = watch::channel(FilterOptions::default());
         rx
     }
 
     fn test_socket_handle() -> SocketHandle {
-        let (_status_tx, status_rx) =
-            tokio::sync::watch::channel(SocketStatus::Disconnected { error: None });
+        let (_status_tx, status_rx) = watch::channel(SocketStatus::Disconnected { error: None });
         test_socket_handle_with_status(status_rx)
     }
 
-    fn test_socket_handle_with_status(
-        status_rx: tokio::sync::watch::Receiver<SocketStatus>,
-    ) -> SocketHandle {
+    fn test_socket_handle_with_status(status_rx: watch::Receiver<SocketStatus>) -> SocketHandle {
         let cancel = tokio_util::sync::CancellationToken::new();
         let task = tokio::spawn(async {});
         SocketHandle {
@@ -242,6 +455,68 @@ mod tests {
             abort_handle: task.abort_handle(),
         }
     }
+
+    fn test_runtime() -> (
+        LiveRuntime,
+        mpsc::Sender<LiveCommand>,
+        mpsc::Sender<RuntimeEvent>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (panel_tx, _) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let (_, filter_rx) = watch::channel(FilterOptions::default());
+
+        let runtime = LiveRuntime {
+            state: RuntimeState::Idle,
+            http_client: HttpClient::new(),
+            panel_tx,
+            overlay_tx,
+            filter_rx,
+            cmd_rx,
+            event_rx,
+            event_tx: event_tx.clone(),
+            next_session: 0,
+        };
+
+        (runtime, cmd_tx, event_tx)
+    }
+
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn pending_task_with_flags(
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_clone = started.clone();
+        let task = tokio::spawn(async move {
+            started_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _guard = DropFlag(dropped);
+            std::future::pending::<()>().await;
+        });
+        (task, started)
+    }
+
+    async fn wait_for_flag(flag: &std::sync::atomic::AtomicBool) {
+        for _ in 0..20 {
+            if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        panic!("task did not start");
+    }
+
+    // Public API tests
 
     #[tokio::test]
     async fn test_status_disconnected_when_idle() {
@@ -277,95 +552,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_rejects_already_running() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
-        let (overlay_tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, test_filter_rx());
-
-        let mut inner = conn.inner.lock().await;
-        let handle = test_socket_handle();
-        let relay_task = tokio::spawn(async {});
-        *inner = ConnectionInner::Active(ActiveConnection {
-            handle,
-            relay_task,
-            generation: 0,
-        });
-        drop(inner);
-
-        let result = conn.start(12345, None).await;
-        assert!(matches!(result.unwrap_err(), StartError::AlreadyRunning));
-
-        conn.stop().await;
-    }
-
-    #[tokio::test]
-    async fn test_start_rejects_already_starting() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
-        let (overlay_tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, test_filter_rx());
-
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Starting(99);
-        drop(inner);
-
-        let result = conn.start(12345, None).await;
-        assert!(matches!(result.unwrap_err(), StartError::AlreadyRunning));
-
-        conn.stop().await;
-    }
-
-    #[tokio::test]
-    async fn test_status_connecting_while_starting() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
-        let (overlay_tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, test_filter_rx());
-
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Starting(1);
-        drop(inner);
-
-        let status = conn.status().await;
-        assert!(matches!(status, SocketStatus::Connecting {}));
-
-        conn.stop().await;
-    }
-
-    #[tokio::test]
-    async fn test_stop_returns_true_when_starting() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
-        let (overlay_tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, test_filter_rx());
-
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Starting(1);
-        drop(inner);
-
-        assert!(conn.stop().await);
-    }
-
-    #[tokio::test]
-    async fn test_stop_during_starting_resets_to_idle() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
-        let (overlay_tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, test_filter_rx());
-
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Starting(5);
-        drop(inner);
-
-        assert!(conn.stop().await);
-
-        let status = conn.status().await;
-        assert!(matches!(status, SocketStatus::Disconnected { error: None }));
-    }
-
-    #[tokio::test]
-    async fn test_start_resets_to_idle_on_auth_failure() {
+    async fn test_auth_failure_returns_to_idle() {
         let http_client = HttpClient::new();
         let (panel_tx, _) = broadcast::channel(16);
         let (overlay_tx, _) = broadcast::channel(16);
@@ -377,65 +564,509 @@ mod tests {
         assert!(matches!(status, SocketStatus::Disconnected { error: None }));
     }
 
+    // Runtime edge tests
+
     #[tokio::test]
-    async fn test_start_rejected_when_already_starting() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
-        let (overlay_tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, test_filter_rx());
+    async fn test_runtime_start_rejects_already_starting() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
 
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Starting(99);
-        drop(inner);
+        let (start_reply, _start_rx) = oneshot::channel();
+        rt.state = RuntimeState::Starting {
+            session: 1,
+            auth_task: tokio::spawn(async {}),
+            start_reply,
+        };
 
-        let result = conn.start(12345, None).await;
-        assert!(matches!(result.unwrap_err(), StartError::AlreadyRunning));
+        let (reply, reply_rx) = oneshot::channel();
+        rt.handle_command(LiveCommand::Start {
+            room_id: 12345,
+            cookie: None,
+            reply,
+        });
 
-        conn.stop().await;
+        assert!(matches!(
+            reply_rx.await.unwrap().unwrap_err(),
+            StartError::AlreadyRunning
+        ));
     }
 
     #[tokio::test]
-    async fn test_auth_failure_returns_cancelled_if_generation_mismatch() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
-        let (overlay_tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, test_filter_rx());
+    async fn test_runtime_start_rejects_already_active() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
 
-        let _old_gen = {
-            let mut inner = conn.inner.lock().await;
-            let gen = conn.next_generation.fetch_add(1, Ordering::Relaxed);
-            *inner = ConnectionInner::Starting(gen);
-            gen
+        let handle = test_socket_handle();
+        rt.state = RuntimeState::Active {
+            session: 1,
+            socket_handle: handle,
+            relay_task: tokio::spawn(async {}),
+            status_task: tokio::spawn(async {}),
+            latest_status: SocketStatus::Connected {},
         };
 
-        conn.stop().await;
+        let (reply, reply_rx) = oneshot::channel();
+        rt.handle_command(LiveCommand::Start {
+            room_id: 12345,
+            cookie: None,
+            reply,
+        });
 
-        {
-            let mut inner = conn.inner.lock().await;
-            let newer_gen = conn.next_generation.fetch_add(1, Ordering::Relaxed);
-            *inner = ConnectionInner::Starting(newer_gen);
+        assert!(matches!(
+            reply_rx.await.unwrap().unwrap_err(),
+            StartError::AlreadyRunning
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_status_connecting_while_starting() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+
+        let (start_reply, _start_rx) = oneshot::channel();
+        rt.state = RuntimeState::Starting {
+            session: 1,
+            auth_task: tokio::spawn(async {}),
+            start_reply,
+        };
+
+        let (reply, reply_rx) = oneshot::channel();
+        rt.handle_command(LiveCommand::Status { reply });
+
+        let status = reply_rx.await.unwrap();
+        assert!(matches!(status, SocketStatus::Connecting {}));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_stop_returns_true_when_starting() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+
+        let (start_reply, _start_rx) = oneshot::channel();
+        rt.state = RuntimeState::Starting {
+            session: 1,
+            auth_task: tokio::spawn(async {}),
+            start_reply,
+        };
+
+        let (reply, reply_rx) = oneshot::channel();
+        rt.handle_command(LiveCommand::Stop { reply });
+
+        assert!(reply_rx.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_stop_during_starting_cancels_pending_start() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+
+        let (start_reply, start_rx) = oneshot::channel();
+        rt.state = RuntimeState::Starting {
+            session: 1,
+            auth_task: tokio::spawn(async {}),
+            start_reply,
+        };
+
+        let (reply, reply_rx) = oneshot::channel();
+        rt.handle_command(LiveCommand::Stop { reply });
+
+        assert!(reply_rx.await.unwrap());
+        assert!(matches!(
+            start_rx.await.unwrap().unwrap_err(),
+            StartError::Cancelled
+        ));
+        assert!(matches!(rt.state, RuntimeState::Idle));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_stop_during_starting_broadcasts_disconnected() {
+        let (panel_tx, mut panel_rx) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (_, filter_rx) = watch::channel(FilterOptions::default());
+        let (start_reply, _start_rx) = oneshot::channel();
+
+        let mut rt = LiveRuntime {
+            state: RuntimeState::Starting {
+                session: 1,
+                auth_task: tokio::spawn(async {}),
+                start_reply,
+            },
+            http_client: HttpClient::new(),
+            panel_tx,
+            overlay_tx,
+            filter_rx,
+            cmd_rx,
+            event_rx,
+            event_tx,
+            next_session: 0,
+        };
+
+        let (reply, reply_rx) = oneshot::channel();
+        rt.handle_command(LiveCommand::Stop { reply });
+
+        assert!(reply_rx.await.unwrap());
+
+        let received = panel_rx.try_recv().unwrap();
+        match received {
+            PanelEvent::Status { status } => {
+                assert!(matches!(status, SocketStatus::Disconnected { error: None }));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_runtime_stop_returns_true_when_active() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+
+        let handle = test_socket_handle();
+        rt.state = RuntimeState::Active {
+            session: 1,
+            socket_handle: handle,
+            relay_task: tokio::spawn(async {}),
+            status_task: tokio::spawn(async {}),
+            latest_status: SocketStatus::Connected {},
+        };
+
+        let (reply, reply_rx) = oneshot::channel();
+        rt.handle_command(LiveCommand::Stop { reply });
+
+        assert!(reply_rx.await.unwrap());
+        assert!(matches!(rt.state, RuntimeState::Idle));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_stale_auth_ignored() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+
+        let (start_reply, _start_rx) = oneshot::channel();
+        rt.state = RuntimeState::Starting {
+            session: 5,
+            auth_task: tokio::spawn(async {}),
+            start_reply,
+        };
+
+        rt.handle_event(RuntimeEvent::AuthFinished {
+            session: 99,
+            result: Ok(WebLiveAuth {
+                uid: Some(1),
+                room_id: 12345,
+                key: "key".into(),
+                buvid3: "b3".into(),
+                urls: vec!["wss://example.com:443/sub".into()],
+            }),
+        })
+        .await;
+
+        assert!(matches!(
+            rt.state,
+            RuntimeState::Starting { session: 5, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_auth_failure_idle() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+
+        let (start_reply, start_rx) = oneshot::channel();
+        rt.state = RuntimeState::Starting {
+            session: 1,
+            auth_task: tokio::spawn(async {}),
+            start_reply,
+        };
+
+        rt.handle_event(RuntimeEvent::AuthFinished {
+            session: 1,
+            result: Err(AuthError::InvalidOutput("test".into())),
+        })
+        .await;
+
+        assert!(matches!(rt.state, RuntimeState::Idle));
+        assert!(matches!(
+            start_rx.await.unwrap().unwrap_err(),
+            StartError::Auth(AuthError::InvalidOutput(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_auth_cookie_not_logged_in() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+
+        let (start_reply, start_rx) = oneshot::channel();
+        rt.state = RuntimeState::Starting {
+            session: 1,
+            auth_task: tokio::spawn(async {}),
+            start_reply,
+        };
+
+        rt.handle_event(RuntimeEvent::AuthFinished {
+            session: 1,
+            result: Err(AuthError::CookieNotLoggedIn),
+        })
+        .await;
+
+        assert!(matches!(rt.state, RuntimeState::Idle));
+        assert!(matches!(
+            start_rx.await.unwrap().unwrap_err(),
+            StartError::CookieNotLoggedIn
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_relay_exit_returns_to_idle() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+
+        let handle = test_socket_handle();
+        rt.state = RuntimeState::Active {
+            session: 7,
+            socket_handle: handle,
+            relay_task: tokio::spawn(async {}),
+            status_task: tokio::spawn(async {}),
+            latest_status: SocketStatus::Connected {},
+        };
+
+        rt.handle_event(RuntimeEvent::RelayExited { session: 7 })
+            .await;
+
+        assert!(matches!(rt.state, RuntimeState::Idle));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_stale_relay_exit_ignored() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+
+        let handle = test_socket_handle();
+        rt.state = RuntimeState::Active {
+            session: 7,
+            socket_handle: handle,
+            relay_task: tokio::spawn(async {}),
+            status_task: tokio::spawn(async {}),
+            latest_status: SocketStatus::Connected {},
+        };
+
+        rt.handle_event(RuntimeEvent::RelayExited { session: 99 })
+            .await;
+
+        assert!(matches!(rt.state, RuntimeState::Active { session: 7, .. }));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_relay_exit_does_not_overwrite_socket_error() {
+        let (panel_tx, mut panel_rx) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (_, filter_rx) = watch::channel(FilterOptions::default());
+
+        let mut rt = LiveRuntime {
+            state: RuntimeState::Active {
+                session: 3,
+                socket_handle: test_socket_handle(),
+                relay_task: tokio::spawn(async {}),
+                status_task: tokio::spawn(async {}),
+                latest_status: SocketStatus::Connected {},
+            },
+            http_client: HttpClient::new(),
+            panel_tx,
+            overlay_tx,
+            filter_rx,
+            cmd_rx,
+            event_rx,
+            event_tx: event_tx.clone(),
+            next_session: 0,
+        };
+
+        drop(cmd_tx);
+        drop(event_tx);
+
+        rt.handle_event(RuntimeEvent::SocketStatusChanged {
+            session: 3,
+            status: SocketStatus::Disconnected {
+                error: Some("read error".into()),
+            },
+        })
+        .await;
+
+        let received = panel_rx.try_recv().unwrap();
+        match received {
+            PanelEvent::Status { ref status } => {
+                assert!(matches!(
+                    status,
+                    SocketStatus::Disconnected {
+                        error: Some(e),
+                    } if e == "read error"
+                ));
+            }
         }
 
-        let result = conn.start(0, None).await;
+        rt.handle_event(RuntimeEvent::RelayExited { session: 3 })
+            .await;
+
+        assert!(matches!(rt.state, RuntimeState::Idle));
+
         assert!(
-            matches!(result.unwrap_err(), StartError::AlreadyRunning),
-            "start should reject immediately when a newer Starting is active"
+            panel_rx.try_recv().is_err(),
+            "relay exit should not broadcast a clean disconnected status"
         );
+    }
 
-        conn.stop().await;
+    #[tokio::test]
+    async fn test_runtime_shutdown_cleans_up_starting() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (auth_task, auth_started) = pending_task_with_flags(dropped.clone());
+        let (start_reply, start_rx) = oneshot::channel();
 
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Idle;
-        drop(inner);
+        rt.state = RuntimeState::Starting {
+            session: 1,
+            auth_task,
+            start_reply,
+        };
 
-        let result = conn.start(0, None).await;
-        assert!(
-            matches!(result.unwrap_err(), StartError::Auth(_)),
-            "auth failure with matching generation should return Auth error"
-        );
+        wait_for_flag(&auth_started).await;
 
-        let status = conn.status().await;
-        assert!(matches!(status, SocketStatus::Disconnected { error: None }));
+        rt.shutdown();
+
+        assert!(matches!(rt.state, RuntimeState::Idle));
+        assert!(matches!(
+            start_rx.await.unwrap().unwrap_err(),
+            StartError::Cancelled
+        ));
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(dropped.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_shutdown_cleans_up_active() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+        let (_status_tx, status_rx) = watch::channel(SocketStatus::Connected {});
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_probe = cancel.clone();
+        let socket_task = tokio::spawn(async {});
+        let relay_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let status_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (relay_task, relay_started) = pending_task_with_flags(relay_dropped.clone());
+        let (status_task, status_started) = pending_task_with_flags(status_dropped.clone());
+
+        rt.state = RuntimeState::Active {
+            session: 1,
+            socket_handle: SocketHandle {
+                status_rx,
+                cancel,
+                abort_handle: socket_task.abort_handle(),
+            },
+            relay_task,
+            status_task,
+            latest_status: SocketStatus::Connected {},
+        };
+
+        wait_for_flag(&relay_started).await;
+        wait_for_flag(&status_started).await;
+
+        rt.shutdown();
+
+        assert!(matches!(rt.state, RuntimeState::Idle));
+        assert!(cancel_probe.is_cancelled());
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(relay_dropped.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(status_dropped.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_socket_status_updates_cached_status() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+
+        let handle = test_socket_handle();
+        rt.state = RuntimeState::Active {
+            session: 3,
+            socket_handle: handle,
+            relay_task: tokio::spawn(async {}),
+            status_task: tokio::spawn(async {}),
+            latest_status: SocketStatus::Connecting {},
+        };
+
+        rt.handle_event(RuntimeEvent::SocketStatusChanged {
+            session: 3,
+            status: SocketStatus::Connected {},
+        })
+        .await;
+
+        match &rt.state {
+            RuntimeState::Active { latest_status, .. } => {
+                assert!(matches!(latest_status, SocketStatus::Connected {}));
+            }
+            _ => panic!("expected Active state"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_runtime_socket_status_broadcasts_panel_event() {
+        let (panel_tx, mut panel_rx) = broadcast::channel(16);
+        let (overlay_tx, _) = broadcast::channel(16);
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (_, filter_rx) = watch::channel(FilterOptions::default());
+
+        let mut rt = LiveRuntime {
+            state: RuntimeState::Active {
+                session: 3,
+                socket_handle: test_socket_handle(),
+                relay_task: tokio::spawn(async {}),
+                status_task: tokio::spawn(async {}),
+                latest_status: SocketStatus::Connecting {},
+            },
+            http_client: HttpClient::new(),
+            panel_tx,
+            overlay_tx,
+            filter_rx,
+            cmd_rx,
+            event_rx,
+            event_tx: event_tx.clone(),
+            next_session: 0,
+        };
+
+        drop(cmd_tx);
+        drop(event_tx);
+
+        rt.handle_event(RuntimeEvent::SocketStatusChanged {
+            session: 3,
+            status: SocketStatus::Connected {},
+        })
+        .await;
+
+        let received = panel_rx.try_recv().unwrap();
+        match received {
+            PanelEvent::Status { status } => {
+                assert!(matches!(status, SocketStatus::Connected {}));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_runtime_stale_socket_status_ignored() {
+        let (mut rt, _cmd_tx, _event_tx) = test_runtime();
+
+        let handle = test_socket_handle();
+        rt.state = RuntimeState::Active {
+            session: 3,
+            socket_handle: handle,
+            relay_task: tokio::spawn(async {}),
+            status_task: tokio::spawn(async {}),
+            latest_status: SocketStatus::Connecting {},
+        };
+
+        rt.handle_event(RuntimeEvent::SocketStatusChanged {
+            session: 99,
+            status: SocketStatus::Disconnected {
+                error: Some("stale".into()),
+            },
+        })
+        .await;
+
+        match &rt.state {
+            RuntimeState::Active { latest_status, .. } => {
+                assert!(matches!(latest_status, SocketStatus::Connecting {}));
+            }
+            _ => panic!("expected Active state"),
+        }
     }
 
     #[tokio::test]
@@ -451,7 +1082,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_socket_handle_stop_aborts_spawned_task() {
-        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
+        let (_status_tx, status_rx) = watch::channel(SocketStatus::Connected {});
         let cancel = tokio_util::sync::CancellationToken::new();
         let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let started_clone = started.clone();
@@ -475,69 +1106,16 @@ mod tests {
         assert!(task.is_finished());
     }
 
-    #[tokio::test]
-    async fn test_relay_loop_resets_state_on_exit() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
-        let (overlay_tx, _) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, test_filter_rx());
-
-        let (status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
-
-        let generation = 42;
-        let filter_rx = conn.filter_rx.clone();
-        let conn_clone = Arc::clone(&conn);
-        let relay_task = tokio::spawn(async move {
-            conn_clone
-                .relay_loop(status_rx, command_rx, filter_rx, generation)
-                .await;
-        });
-
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Active(ActiveConnection {
-            handle: test_socket_handle_with_status(status_tx.subscribe()),
-            relay_task,
-            generation,
-        });
-        drop(inner);
-
-        drop(command_tx);
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let status = conn.status().await;
-        assert!(matches!(status, SocketStatus::Disconnected { error: None }));
-    }
+    // Relay loop tests
 
     #[tokio::test]
     async fn test_relay_loop_broadcasts_parsed_command_to_overlay() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
         let (overlay_tx, mut overlay_rx) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, test_filter_rx());
+        let (command_tx, command_rx) = mpsc::channel(16);
+        let (_filter_tx, filter_rx) = watch::channel(FilterOptions::default());
+        let (event_tx, _event_rx) = mpsc::channel(16);
 
-        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
-
-        let generation = 100;
-        let filter_rx = conn.filter_rx.clone();
-        let conn_clone = Arc::clone(&conn);
-        let relay_task = tokio::spawn(async move {
-            conn_clone
-                .relay_loop(status_rx, command_rx, filter_rx, generation)
-                .await;
-        });
-
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Active(ActiveConnection {
-            handle: test_socket_handle_with_status(
-                tokio::sync::watch::channel(SocketStatus::Connected {}).1,
-            ),
-            relay_task,
-            generation,
-        });
-        drop(inner);
+        let relay_task = tokio::spawn(relay_loop(command_rx, overlay_tx, filter_rx, event_tx, 100));
 
         let danmu = serde_json::json!({
             "cmd": "DANMU_MSG",
@@ -560,41 +1138,20 @@ mod tests {
             matches!(received, OverlayEvent::Normal { ref sender, ref text, .. } if sender == "RelayUser" && text == "relay test")
         );
 
-        conn.stop().await;
+        relay_task.abort();
     }
 
     #[tokio::test]
     async fn test_relay_loop_skips_unknown_command() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
         let (overlay_tx, mut overlay_rx) = broadcast::channel(16);
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, test_filter_rx());
+        let (command_tx, command_rx) = mpsc::channel(16);
+        let (_filter_tx, filter_rx) = watch::channel(FilterOptions::default());
+        let (event_tx, _event_rx) = mpsc::channel(16);
 
-        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
-
-        let generation = 101;
-        let filter_rx = conn.filter_rx.clone();
-        let conn_clone = Arc::clone(&conn);
-        let relay_task = tokio::spawn(async move {
-            conn_clone
-                .relay_loop(status_rx, command_rx, filter_rx, generation)
-                .await;
-        });
-
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Active(ActiveConnection {
-            handle: test_socket_handle_with_status(
-                tokio::sync::watch::channel(SocketStatus::Connected {}).1,
-            ),
-            relay_task,
-            generation,
-        });
-        drop(inner);
+        let relay_task = tokio::spawn(relay_loop(command_rx, overlay_tx, filter_rx, event_tx, 101));
 
         let unknown = serde_json::json!({"cmd": "ROOM_CHANGE", "data": {"title": "new"}});
         command_tx.send(unknown).await.unwrap();
-        drop(command_tx);
 
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(100), overlay_rx.recv()).await;
@@ -604,41 +1161,21 @@ mod tests {
             "unknown command should not produce overlay event"
         );
 
-        conn.stop().await;
+        drop(command_tx);
+        relay_task.abort();
     }
 
     #[tokio::test]
     async fn test_relay_loop_blocks_filtered_user() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
         let (overlay_tx, mut overlay_rx) = broadcast::channel(16);
-        let (filter_tx, filter_rx) = tokio::sync::watch::channel(FilterOptions {
+        let (command_tx, command_rx) = mpsc::channel(16);
+        let (filter_tx, filter_rx) = watch::channel(FilterOptions {
             blocked_users: vec!["BlockedUser".into()],
             blocked_keywords: vec![],
         });
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, filter_rx);
+        let (event_tx, _event_rx) = mpsc::channel(16);
 
-        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
-
-        let generation = 200;
-        let filter_rx = conn.filter_rx.clone();
-        let conn_clone = Arc::clone(&conn);
-        let relay_task = tokio::spawn(async move {
-            conn_clone
-                .relay_loop(status_rx, command_rx, filter_rx, generation)
-                .await;
-        });
-
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Active(ActiveConnection {
-            handle: test_socket_handle_with_status(
-                tokio::sync::watch::channel(SocketStatus::Connected {}).1,
-            ),
-            relay_task,
-            generation,
-        });
-        drop(inner);
+        let relay_task = tokio::spawn(relay_loop(command_rx, overlay_tx, filter_rx, event_tx, 200));
 
         let danmu = serde_json::json!({
             "cmd": "DANMU_MSG",
@@ -649,8 +1186,6 @@ mod tests {
             ]
         });
         command_tx.send(danmu).await.unwrap();
-        drop(command_tx);
-        drop(filter_tx);
 
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(100), overlay_rx.recv()).await;
@@ -660,41 +1195,22 @@ mod tests {
             "filtered user should not produce overlay event"
         );
 
-        conn.stop().await;
+        drop(command_tx);
+        drop(filter_tx);
+        relay_task.abort();
     }
 
     #[tokio::test]
     async fn test_relay_loop_blocks_filtered_keyword() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
         let (overlay_tx, mut overlay_rx) = broadcast::channel(16);
-        let (filter_tx, filter_rx) = tokio::sync::watch::channel(FilterOptions {
+        let (command_tx, command_rx) = mpsc::channel(16);
+        let (filter_tx, filter_rx) = watch::channel(FilterOptions {
             blocked_users: vec![],
             blocked_keywords: vec!["forbidden".into()],
         });
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, filter_rx);
+        let (event_tx, _event_rx) = mpsc::channel(16);
 
-        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
-
-        let generation = 201;
-        let filter_rx = conn.filter_rx.clone();
-        let conn_clone = Arc::clone(&conn);
-        let relay_task = tokio::spawn(async move {
-            conn_clone
-                .relay_loop(status_rx, command_rx, filter_rx, generation)
-                .await;
-        });
-
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Active(ActiveConnection {
-            handle: test_socket_handle_with_status(
-                tokio::sync::watch::channel(SocketStatus::Connected {}).1,
-            ),
-            relay_task,
-            generation,
-        });
-        drop(inner);
+        let relay_task = tokio::spawn(relay_loop(command_rx, overlay_tx, filter_rx, event_tx, 201));
 
         let danmu = serde_json::json!({
             "cmd": "DANMU_MSG",
@@ -705,8 +1221,6 @@ mod tests {
             ]
         });
         command_tx.send(danmu).await.unwrap();
-        drop(command_tx);
-        drop(filter_tx);
 
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(100), overlay_rx.recv()).await;
@@ -716,38 +1230,19 @@ mod tests {
             "filtered keyword should not produce overlay event"
         );
 
-        conn.stop().await;
+        drop(command_tx);
+        drop(filter_tx);
+        relay_task.abort();
     }
 
     #[tokio::test]
     async fn test_filter_update_takes_effect_without_restart() {
-        let http_client = HttpClient::new();
-        let (panel_tx, _) = broadcast::channel(16);
         let (overlay_tx, mut overlay_rx) = broadcast::channel(16);
-        let (filter_tx, filter_rx) = tokio::sync::watch::channel(FilterOptions::default());
-        let conn = LiveConnection::new(http_client, panel_tx, overlay_tx, filter_rx);
+        let (command_tx, command_rx) = mpsc::channel(16);
+        let (filter_tx, filter_rx) = watch::channel(FilterOptions::default());
+        let (event_tx, _event_rx) = mpsc::channel(16);
 
-        let (_status_tx, status_rx) = tokio::sync::watch::channel(SocketStatus::Connected {});
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
-
-        let generation = 300;
-        let filter_rx = conn.filter_rx.clone();
-        let conn_clone = Arc::clone(&conn);
-        let relay_task = tokio::spawn(async move {
-            conn_clone
-                .relay_loop(status_rx, command_rx, filter_rx, generation)
-                .await;
-        });
-
-        let mut inner = conn.inner.lock().await;
-        *inner = ConnectionInner::Active(ActiveConnection {
-            handle: test_socket_handle_with_status(
-                tokio::sync::watch::channel(SocketStatus::Connected {}).1,
-            ),
-            relay_task,
-            generation,
-        });
-        drop(inner);
+        let relay_task = tokio::spawn(relay_loop(command_rx, overlay_tx, filter_rx, event_tx, 300));
 
         let danmu1 = serde_json::json!({
             "cmd": "DANMU_MSG",
@@ -787,8 +1282,6 @@ mod tests {
             ]
         });
         command_tx.send(danmu2).await.unwrap();
-        drop(command_tx);
-        drop(filter_tx);
 
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(100), overlay_rx.recv()).await;
@@ -798,6 +1291,59 @@ mod tests {
             "event from blocked user should not reach overlay after filter update"
         );
 
-        conn.stop().await;
+        drop(command_tx);
+        drop(filter_tx);
+        relay_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_relay_loop_sends_relay_exited_on_natural_exit() {
+        let (overlay_tx, _) = broadcast::channel(16);
+        let (command_tx, command_rx) = mpsc::channel(16);
+        let (_filter_tx, filter_rx) = watch::channel(FilterOptions::default());
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+
+        let relay_task = tokio::spawn(relay_loop(command_rx, overlay_tx, filter_rx, event_tx, 400));
+
+        drop(command_tx);
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(200), event_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event channel closed");
+
+        match event {
+            RuntimeEvent::RelayExited { session } => {
+                assert_eq!(session, 400);
+            }
+            _ => panic!("expected RelayExited"),
+        }
+
+        relay_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_status_watcher_sends_status_changed() {
+        let (status_tx, status_rx) = watch::channel(SocketStatus::Connecting {});
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+
+        let watcher_task = tokio::spawn(status_watcher(status_rx, event_tx, 99));
+
+        let _ = status_tx.send(SocketStatus::Connected {});
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(200), event_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event channel closed");
+
+        match event {
+            RuntimeEvent::SocketStatusChanged { session, status } => {
+                assert_eq!(session, 99);
+                assert!(matches!(status, SocketStatus::Connected {}));
+            }
+            _ => panic!("expected SocketStatusChanged"),
+        }
+
+        watcher_task.abort();
     }
 }
